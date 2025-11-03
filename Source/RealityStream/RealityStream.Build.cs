@@ -17,7 +17,9 @@ public class RealityStream : ModuleRules
                 "Engine",
                 "ImageWrapper",
                 "WebSockets",
-                "ProceduralMeshComponent"
+                "ProceduralMeshComponent",
+                "Json",
+                "JsonUtilities"
             }
         );
 

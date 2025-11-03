@@ -13,6 +13,7 @@
 #include "Components/SceneComponent.h"
 #include "Async/Async.h"
 #include "HAL/RunnableThread.h"
+#include "GameFramework/RotatingMovementComponent.h"
 
 //reconstruction to mesh importer from World Explorer to Unreal Engine 5.6 
 
@@ -260,7 +261,7 @@ void USplatCreatorSubsystem::CycleMeshes()
     FString MeshFile = GetOutputDirectory() / PlyFiles[CurrentFileIndex];
     FString ObjFile;
     bool bFileHandled = false; // Track if we successfully handled this file
-    
+
     // Check if file is already OBJ
     if (MeshFile.EndsWith(TEXT(".obj")))
     {
@@ -279,9 +280,9 @@ void USplatCreatorSubsystem::CycleMeshes()
             
             CurrentMeshActor = ImportAndSpawnOBJMesh(
                 ObjFile,
-                FVector(100,0,100),
+                FVector(100,0,0),
                 FRotator(180,0,0),
-                FVector(400)
+                FVector(500)
             );
             bFileHandled = true;
         }
@@ -289,7 +290,7 @@ void USplatCreatorSubsystem::CycleMeshes()
     else
     {
         // It's a PLY file, check if OBJ already exists
-        ObjFile = MeshFile.Replace(TEXT(".ply"), TEXT(".obj"));
+        ObjFile = MeshFile.Replace(TEXT(".ply"), TEXT("_mesh.obj"));
         
         if (FPaths::FileExists(ObjFile))
         {
@@ -305,9 +306,9 @@ void USplatCreatorSubsystem::CycleMeshes()
             // Spawn mesh immediately
             CurrentMeshActor = ImportAndSpawnOBJMesh(
                 ObjFile,
-                FVector(100,0,100),
+                FVector(100,0,0),
                 FRotator(180,0,0),
-                FVector(400)
+                FVector(500)
             );
             bFileHandled = true;
         }
@@ -370,9 +371,9 @@ void USplatCreatorSubsystem::CycleMeshes()
                             
                             CurrentMeshActor = ImportAndSpawnOBJMesh(
                                 ObjFileCopy,
-                                FVector(100,0,100),
+                                FVector(100,0,0),
                                 FRotator(180,0,0),
-                                FVector(400)
+                                FVector(500)
                             );
                             
                             if (CurrentMeshActor)
@@ -581,6 +582,20 @@ AActor* USplatCreatorSubsystem::ImportAndSpawnOBJMesh(
 	FRotator Rotation, 
 	FVector Scale)
 {
+	// Ensure we're on the game thread
+	if (!IsInGameThread())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] ImportAndSpawnOBJMesh called from non-game thread!"));
+		return nullptr;
+	}
+
+	// Prevent concurrent actor spawning to avoid crashes with ComfyUI
+	if (bIsSpawningActor)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Actor spawn already in progress, skipping"));
+		return nullptr;
+	}
+
 	if (!FPaths::FileExists(ObjPath))
 	{
 		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] OBJ file not found: %s"), *ObjPath);
@@ -588,60 +603,82 @@ AActor* USplatCreatorSubsystem::ImportAndSpawnOBJMesh(
 	}
 
 	UWorld* World = GetWorld();
-	if (!World)
+	if (!World || !World->IsGameWorld())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] No world context"));
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Invalid world context"));
 		return nullptr;
 	}
+
+	// Set spawn lock
+	bIsSpawningActor = true;
 
 	AActor* MeshActor = World->SpawnActor<AActor>();
 	if (!MeshActor)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to spawn actor"));
+		bIsSpawningActor = false;
 		return nullptr;
 	}
 
 	UProceduralMeshComponent* MeshComp = CreateProceduralMeshFromOBJ(ObjPath, MeshActor);
-	if (MeshComp)
+	if (!MeshComp)
 	{
-		MeshComp->SetMobility(EComponentMobility::Movable);
-		MeshActor->SetRootComponent(MeshComp);
-		
-		// Apply transform AFTER root component is set
-		MeshActor->SetActorLocation(Location);
-		MeshActor->SetActorRotation(Rotation);
-		MeshActor->SetActorScale3D(Scale);
-		
-		// Also apply transform to the root component directly to ensure it sticks
-		if (USceneComponent* RootComp = MeshActor->GetRootComponent())
-		{
-			RootComp->SetWorldLocation(Location);
-			RootComp->SetWorldRotation(Rotation);
-			RootComp->SetWorldScale3D(Scale);
-		}
-		
-		// Load and apply M_VertexColor material with fallbacks
-		UMaterial* VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
-		if (!VertexColorMat)
-		{
-			VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Game/M_VertexColor.M_VertexColor"));
-		}
-		if (!VertexColorMat)
-		{
-			VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Engine/EditorMaterials/WidgetVertexColorMaterial"));
-		}
-		if (VertexColorMat)
-		{
-			MeshComp->SetMaterial(0, VertexColorMat);
-			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Applied M_VertexColor material"));
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] M_VertexColor material not found in any location"));
-		}
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to create procedural mesh component"));
+		MeshActor->Destroy();
+		bIsSpawningActor = false;
+		return nullptr;
+	}
+	
+	// MeshComp is valid, proceed with setup
+	MeshComp->SetMobility(EComponentMobility::Movable);
+	MeshActor->SetRootComponent(MeshComp);
+	
+	// Add spinning motion - must be after root component is set
+	URotatingMovementComponent* Rotator = NewObject<URotatingMovementComponent>(MeshActor);
+	if (Rotator)
+	{
+		Rotator->RotationRate = FRotator(0.f, 20.f, 0.f);
+		Rotator->RegisterComponent();
+	}
+	
+	// Apply transform AFTER root component is set
+	MeshActor->SetActorLocation(Location);
+	MeshActor->SetActorRotation(Rotation);
+	MeshActor->SetActorScale3D(Scale);
+	
+	// Also apply transform to the root component directly to ensure it sticks
+	if (USceneComponent* RootComp = MeshActor->GetRootComponent())
+	{
+		RootComp->SetWorldLocation(Location);
+		RootComp->SetWorldRotation(Rotation);
+		RootComp->SetWorldScale3D(Scale);
+	}
+	
+	// Load and apply M_VertexColor material with fallbacks
+	UMaterial* VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
+	if (!VertexColorMat)
+	{
+		VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Game/M_VertexColor.M_VertexColor"));
+	}
+	if (!VertexColorMat)
+	{
+		VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Engine/EditorMaterials/WidgetVertexColorMaterial"));
+	}
+	if (VertexColorMat)
+	{
+		VertexColorMat->TwoSided = true;  // Allow both sides to be visible
+		MeshComp->SetMaterial(0, VertexColorMat);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Applied M_VertexColor material (TwoSided)"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] M_VertexColor material not found in any location"));
 	}
 
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Spawned mesh at %s"), *Location.ToString());
+	
+	// Clear spawn lock
+	bIsSpawningActor = false;
 	return MeshActor;
 }
 
@@ -675,178 +712,105 @@ UProceduralMeshComponent* USplatCreatorSubsystem::CreateProceduralMeshFromOBJ(co
 	return MeshComp;
 }
 
-bool USplatCreatorSubsystem::ParseOBJFile(const FString& OBJPath, TArray<FVector>& OutVertices, TArray<int32>& OutTriangles, TArray<FVector>& OutNormals, TArray<FColor>& OutColors)
-{
-	TArray<FString> Lines;
-	if (!FFileHelper::LoadFileToStringArray(Lines, *OBJPath))
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to load OBJ file"));
-		return false;
-	}
+bool USplatCreatorSubsystem::ParseOBJFile(
+    const FString& OBJPath,
+    TArray<FVector>& OutVertices,
+    TArray<int32>& OutTriangles,
+    TArray<FVector>& OutNormals,
+    TArray<FColor>& OutColors
+){
+    TArray<FString> Lines;
+    if (!FFileHelper::LoadFileToStringArray(Lines, *OBJPath))
+    {
+        UE_LOG(LogTemp, Error, TEXT("[OBJ] Cannot read file"));
+        return false;
+    }
 
-	TArray<FVector> Positions;
-	TArray<FVector> Normals;
-	TArray<FColor> Colors;
+    TArray<FVector> Positions;
+    TArray<FVector> Normals;
+    TArray<FColor>  Colors;
 
-	// First pass: parse vertex positions, normals, and colors
-	for (const FString& Line : Lines)
-	{
-		if (Line.StartsWith(TEXT("v ")))
-		{
-			// Vertex position (may have color)
-			TArray<FString> Parts;
-			Line.ParseIntoArray(Parts, TEXT(" "), true);
-			
-			if (Parts.Num() >= 4)
-			{
-				FVector Pos(
-					FCString::Atof(*Parts[1]),
-					FCString::Atof(*Parts[2]),
-					FCString::Atof(*Parts[3])
-				);
-				Positions.Add(Pos);
-				
-				// Check for vertex colors (if present)
-				if (Parts.Num() >= 7)
-				{
-					// Reduce brightness to 50% to prevent glowing
-					float BrightnessFactor = 0.5f;
-					FColor Color(
-						FMath::Clamp(FCString::Atof(*Parts[4]) * 255 * BrightnessFactor, 0.0f, 255.0f),
-						FMath::Clamp(FCString::Atof(*Parts[5]) * 255 * BrightnessFactor, 0.0f, 255.0f),
-						FMath::Clamp(FCString::Atof(*Parts[6]) * 255 * BrightnessFactor, 0.0f, 255.0f),
-						255
-					);
-					Colors.Add(Color);
-				}
-			}
-		}
-		else if (Line.StartsWith(TEXT("vn ")))
-		{
-			// Vertex normal
-			TArray<FString> Parts;
-			Line.ParseIntoArray(Parts, TEXT(" "), true);
-			
-			if (Parts.Num() >= 4)
-			{
-				FVector Normal(
-					FCString::Atof(*Parts[1]),
-					FCString::Atof(*Parts[2]),
-					FCString::Atof(*Parts[3])
-				);
-				Normals.Add(Normal);
-			}
-		}
-	}
+    struct FOBJIndex { int32 v, vn; };
+    TArray<TArray<FOBJIndex>> Faces;
 
-	// Second pass: parse faces and build final vertex/index arrays
-	for (const FString& Line : Lines)
-	{
-		if (Line.StartsWith(TEXT("f ")))
-		{
-			// Face definition
-			TArray<FString> Parts;
-			Line.ParseIntoArray(Parts, TEXT(" "), true);
-			
-			if (Parts.Num() >= 4)
-			{
-				// Parse face indices (format: v/vt/vn or v//vn or v)
-				TArray<int32> FaceIndices;
-				for (int32 i = 1; i < Parts.Num(); i++)
-				{
-					TArray<FString> IndexParts;
-					Parts[i].ParseIntoArray(IndexParts, TEXT("/"), false);
-					
-					if (IndexParts.Num() > 0)
-					{
-						int32 VertexIndex = FCString::Atoi(*IndexParts[0]) - 1; // OBJ indices are 1-based
-						FaceIndices.Add(VertexIndex);
-					}
-				}
-				
-				// Triangulate face (assuming convex polygons)
-				for (int32 i = 1; i < FaceIndices.Num() - 1; i++)
-				{
-					int32 V0 = FaceIndices[0];
-					int32 V1 = FaceIndices[i];
-					int32 V2 = FaceIndices[i + 1];
-					
-					if (V0 >= 0 && V0 < Positions.Num() && 
-					    V1 >= 0 && V1 < Positions.Num() && 
-					    V2 >= 0 && V2 < Positions.Num())
-					{
-						int32 Idx0 = OutVertices.Add(Positions[V0]);
-						int32 Idx1 = OutVertices.Add(Positions[V1]);
-						int32 Idx2 = OutVertices.Add(Positions[V2]);
-						
-						OutTriangles.Add(Idx0);
-						OutTriangles.Add(Idx1);
-						OutTriangles.Add(Idx2);
-						
-						// Map colors if available
-						if (V0 < Colors.Num()) OutColors.Add(Colors[V0]);
-						else OutColors.Add(FColor::White);
-						
-						if (V1 < Colors.Num()) OutColors.Add(Colors[V1]);
-						else OutColors.Add(FColor::White);
-						
-						if (V2 < Colors.Num()) OutColors.Add(Colors[V2]);
-						else OutColors.Add(FColor::White);
-						
-						// Map normals if available
-						if (V0 < Normals.Num()) OutNormals.Add(Normals[V0]);
-						else OutNormals.Add(FVector(0, 0, 1));
-						
-						if (V1 < Normals.Num()) OutNormals.Add(Normals[V1]);
-						else OutNormals.Add(FVector(0, 0, 1));
-						
-						if (V2 < Normals.Num()) OutNormals.Add(Normals[V2]);
-						else OutNormals.Add(FVector(0, 0, 1));
-					}
-				}
-			}
-		}
-	}
-	
-	if (OutVertices.Num() == 0)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] No vertices parsed from OBJ"));
-		return false;
-	}
+    for (const FString& Line : Lines)
+    {
+        FString L = Line.TrimStart();
 
-	// Ensure all arrays match
-	if (OutColors.Num() < OutVertices.Num())
-	{
-		int32 Needed = OutVertices.Num() - OutColors.Num();
-		for (int32 i = 0; i < Needed; i++)
-		{
-			OutColors.Add(FColor::White);
-		}
-	}
+        if (L.StartsWith("v "))
+        {
+            TArray<FString> P;
+            L.ParseIntoArray(P, TEXT(" "));
 
-	if (OutNormals.Num() < OutVertices.Num())
-	{
-		int32 Needed = OutVertices.Num() - OutNormals.Num();
-		for (int32 i = 0; i < Needed; i++)
-		{
-			OutNormals.Add(FVector(0, 0, 1));
-		}
-	}
+            Positions.Add(FVector(FCString::Atof(*P[1]), FCString::Atof(*P[2]), FCString::Atof(*P[3])));
 
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed OBJ: %d vertices, %d triangles, %d colors"), 
-		OutVertices.Num(), OutTriangles.Num() / 3, OutColors.Num());
+            if (P.Num() >= 7)
+            {
+                Colors.Add(FLinearColor(
+                    FCString::Atof(*P[4]) / 255.f,
+                    FCString::Atof(*P[5]) / 255.f,
+                    FCString::Atof(*P[6]) / 255.f
+                ).ToFColor(true));
+            }
+            else Colors.Add(FColor::White);
+        }
+        else if (L.StartsWith("vn "))
+        {
+            TArray<FString> P;
+            L.ParseIntoArray(P, TEXT(" "));
+            Normals.Add(FVector(FCString::Atof(*P[1]), FCString::Atof(*P[2]), FCString::Atof(*P[3])));
+        }
+        else if (L.StartsWith("f "))
+        {
+            TArray<FString> P;
+            L.ParseIntoArray(P, TEXT(" "));
+            TArray<FOBJIndex> Face;
 
-	// Debug: Print first few vertex colors to verify they're loaded
-	if (OutColors.Num() > 0)
-	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] ✓ Vertex colors loaded! First 3 colors:"));
-		for (int32 i = 0; i < FMath::Min(3, OutColors.Num()); i++)
-		{
-			FColor Color = OutColors[i];
-		}
-	}
+            for (int i = 1; i < P.Num(); i++)
+            {
+                TArray<FString> Idx;
+                P[i].ParseIntoArray(Idx, TEXT("/"));
 
-	return true;
+                FOBJIndex I;
+                I.v  = (Idx.Num() > 0) ? FCString::Atoi(*Idx[0]) - 1 : -1;
+                I.vn = (Idx.Num() > 2 && !Idx[2].IsEmpty()) ? FCString::Atoi(*Idx[2]) - 1 : -1;
+                Face.Add(I);
+            }
+            Faces.Add(Face);
+        }
+    }
+
+    OutVertices.Empty();
+    OutTriangles.Empty();
+    OutColors.Empty();
+    OutNormals.Empty();
+
+    for (auto& Face : Faces)
+    {
+        for (int32 i = 1; i < Face.Num() - 1; i++)
+        {
+            FOBJIndex Idx[3] = {Face[0], Face[i], Face[i+1]};
+
+            for (int j = 0; j < 3; j++)
+            {
+                int32 V = Idx[j].v;
+                int32 Index = OutVertices.Add(Positions[V]);
+
+                OutTriangles.Add(Index);
+                OutColors.Add(Colors[V]);
+                
+                if (Idx[j].vn >= 0 && Idx[j].vn < Normals.Num())
+                    OutNormals.Add(Normals[Idx[j].vn]);
+                else
+                    OutNormals.Add(FVector::ZeroVector);
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("[OBJ] Parsed %d vertices, %d triangles"), OutVertices.Num(), OutTriangles.Num()/3);
+    return true;
 }
+
+
 
 

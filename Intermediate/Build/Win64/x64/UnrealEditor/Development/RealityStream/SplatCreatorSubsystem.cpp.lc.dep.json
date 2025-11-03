@@ -9,7 +9,11 @@
             "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\public\\splatcreator\\splatcreatorsubsystem.h",
             "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\unrealeditor\\inc\\realitystream\\uht\\splatcreatorsubsystem.generated.h",
             "c:\\program files\\epic games\\ue_5.6\\engine\\plugins\\runtime\\proceduralmeshcomponent\\source\\proceduralmeshcomponent\\public\\proceduralmeshcomponent.h",
-            "c:\\program files\\epic games\\ue_5.6\\engine\\plugins\\runtime\\proceduralmeshcomponent\\intermediate\\build\\win64\\unrealeditor\\inc\\proceduralmeshcomponent\\uht\\proceduralmeshcomponent.generated.h"
+            "c:\\program files\\epic games\\ue_5.6\\engine\\plugins\\runtime\\proceduralmeshcomponent\\intermediate\\build\\win64\\unrealeditor\\inc\\proceduralmeshcomponent\\uht\\proceduralmeshcomponent.generated.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\source\\runtime\\engine\\classes\\gameframework\\rotatingmovementcomponent.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\source\\runtime\\engine\\classes\\gameframework\\movementcomponent.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\intermediate\\build\\win64\\unrealeditor\\inc\\engine\\uht\\movementcomponent.generated.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\intermediate\\build\\win64\\unrealeditor\\inc\\engine\\uht\\rotatingmovementcomponent.generated.h"
         ],
         "ImportedModules": [],
         "ImportedHeaderUnits": []

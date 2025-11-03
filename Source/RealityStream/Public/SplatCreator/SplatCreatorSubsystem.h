@@ -27,6 +27,7 @@ private:
 	FTimerHandle LoopTimer;
 	FString CurrentlyConvertingFile; // Track which file is being converted to avoid duplicate conversions
 	bool bIsShuttingDown = false; // Track if subsystem is shutting down to prevent async crashes
+	bool bIsSpawningActor = false; // Track if we're currently spawning an actor to prevent concurrent spawns
 
 	// Docker container management
 	void StartDockerContainer();

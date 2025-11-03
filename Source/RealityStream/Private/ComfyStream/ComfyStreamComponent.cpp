@@ -70,15 +70,6 @@ void UComfyStreamComponent::OnTextureReceivedInternal(UTexture2D* Texture)
 {
 	if (!Texture) return;
 
-	//storing states between calls 
-	static int32 Seq = 0;
-	const int32 Index = Seq % 3;
-	Seq++;
-
-	if (Index == 0) RGBLerpState.StartLerp(Texture);
-	if (Index == 1) DepthLerpState.StartLerp(Texture);
-	if (Index == 2) MaskLerpState.StartLerp(Texture);
-
 	// If lerp smoothing is disabled, broadcast immediately
 	if (!StreamConfig.bEnableLerpSmoothing)
 	{

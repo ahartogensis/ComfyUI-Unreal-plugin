@@ -73,4 +73,5 @@ private:
 	void ProcessImageData(const TArray<uint8>& Data);
 	void SetConnectionStatus(EComfyConnectionStatus NewStatus);
 	FString BuildWebSocketURL(const FString& ServerURL, int32 ChannelNumber);
+	TArray<TArray<uint8>> SplitPNGStream(const TArray<uint8>& Buffer);
 };

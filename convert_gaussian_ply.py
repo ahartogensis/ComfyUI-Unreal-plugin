@@ -163,190 +163,6 @@ def downsample_data(positions, normals, colors, target_count=10000):
 
 
 # ============================================================
-# === OBJ + MTL Writer =======================================
-# ============================================================
-
-def create_oriented_quad(position, normal, quad_size=0.02):
-    """Create a quad oriented to face along its normal direction.
-    
-    Args:
-        position: [x, y, z] center position
-        normal: [nx, ny, nz] normal direction
-        quad_size: size of the quad
-    
-    Returns:
-        List of 4 vertices forming the quad
-    """
-    half = quad_size / 2
-    x, y, z = position
-    nx, ny, nz = normal
-    
-    # Normalize the normal
-    normal_length = math.sqrt(nx*nx + ny*ny + nz*nz)
-    if normal_length > 0.0001:
-        nx, ny, nz = nx/normal_length, ny/normal_length, nz/normal_length
-    else:
-        nx, ny, nz = 0, 0, 1  # Default to Z-up if no normal
-    
-    # Create a coordinate system based on the normal
-    # Find a perpendicular vector (tangent)
-    if abs(nx) < 0.9:
-        tangent = [1, 0, 0]
-    else:
-        tangent = [0, 1, 0]
-    
-    # Cross product: bitangent = normal × tangent
-    bx = ny * tangent[2] - nz * tangent[1]
-    by = nz * tangent[0] - nx * tangent[2]
-    bz = nx * tangent[1] - ny * tangent[0]
-    
-    # Normalize bitangent
-    b_length = math.sqrt(bx*bx + by*by + bz*bz)
-    if b_length > 0.0001:
-        bx, by, bz = bx/b_length, by/b_length, bz/b_length
-    
-    # Cross product: tangent = bitangent × normal
-    tx = by * nz - bz * ny
-    ty = bz * nx - bx * nz
-    tz = bx * ny - by * nx
-    
-    # Create quad vertices in the tangent/bitangent plane
-    vertices = [
-        [x - tx*half - bx*half, y - ty*half - by*half, z - tz*half - bz*half],  # Bottom-left
-        [x + tx*half - bx*half, y + ty*half - by*half, z + tz*half - bz*half],  # Bottom-right
-        [x + tx*half + bx*half, y + ty*half + by*half, z + tz*half + bz*half],  # Top-right
-        [x - tx*half + bx*half, y - ty*half + by*half, z - tz*half + bz*half]   # Top-left
-    ]
-    
-    return vertices
-
-def create_color_texture(colors, texture_file):
-    """Create a simple color texture from the colors using basic Python."""
-    try:
-        # Create a simple PPM (Portable Pixmap) file - no external dependencies needed
-        num_colors = len(colors)
-        width = min(1024, num_colors)  # Max 1024 pixels wide
-        height = max(1, (num_colors + width - 1) // width)  # Calculate height needed
-        
-        with open(texture_file, 'w') as f:
-            # Write PPM header
-            f.write("P3\n")
-            f.write(f"{width} {height}\n")
-            f.write("255\n")
-            
-            # Write pixel data
-            for row in range(height):
-                for col in range(width):
-                    i = row * width + col
-                    if i < num_colors:
-                        color = colors[i]
-                        # Convert from 0-1 range to 0-255 range
-                        r = int(max(0, min(255, color[0] * 255)))
-                        g = int(max(0, min(255, color[1] * 255)))
-                        b = int(max(0, min(255, color[2] * 255)))
-                        f.write(f"{r} {g} {b} ")
-                    else:
-                        f.write("0 0 0 ")  # Black for unused pixels
-                f.write("\n")
-        
-        print(f"[SplatCreator] Created color texture: {texture_file}")
-        return width, height
-        
-    except Exception as e:
-        print(f"[SplatCreator] Error creating texture: {e}")
-        return None, None
-
-def write_obj_with_materials(positions, normals, colors, output_file):
-    """Write OBJ + MTL with texture mapping and normal-oriented quads."""
-    mtl_file = output_file.replace('.obj', '.mtl')
-    texture_file = output_file.replace('.obj', '_texture.ppm')
-    
-    # Create texture if we have colors
-    tex_width, tex_height = None, None
-    if colors:
-        tex_width, tex_height = create_color_texture(colors, texture_file)
-    
-    # Estimate normals if not provided using Open3D
-    if not normals or len(normals) == 0:
-        print("[SplatCreator] Estimating normals for quad orientation...")
-        import open3d as o3d
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(np.array(positions))
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
-        )
-        normals_array = np.asarray(pcd.normals)
-        normals = normals_array.tolist()
-        print(f"[SplatCreator] Estimated {len(normals)} normals")
-    
-    f = open(output_file, 'w')
-    f.write("# Gaussian Splat OBJ (Unreal coords, normal-oriented quads)\n")
-    f.write(f"mtllib {os.path.basename(mtl_file)}\n")
-    f.write("usemtl color_texture\n")
-
-    quad_size = 0.009  # Much smaller quads for finer detail
-    
-    # Write vertices using oriented quads
-    for i, pos in enumerate(positions):
-        normal = normals[i] if normals and i < len(normals) else [0, 0, 1]
-        verts = create_oriented_quad(pos, normal, quad_size)
-        for v in verts:
-            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-
-    # Write texture coordinates
-    if colors and tex_width and tex_height:
-        for i in range(len(positions)):
-            # Calculate texture coordinates for this point
-            col = i % tex_width
-            row = i // tex_width
-            u = (col + 0.5) / tex_width
-            v = 1.0 - (row + 0.5) / tex_height  # Flip V coordinate
-            
-            # Each quad gets the same UV (point color)
-            for _ in range(4):
-                f.write(f"vt {u:.6f} {v:.6f}\n")
-
-    # Write normals
-    if normals:
-        for n in normals:
-            for _ in range(4):
-                f.write(f"vn {n[0]:.6f} {n[1]:.6f} {n[2]:.6f}\n")
-
-    # Write faces with texture coordinates
-    for i in range(len(positions)):
-        base = i*4+1
-        if colors and tex_width:
-            # Include texture coordinates in face definition
-            if normals:
-                f.write(f"f {base}/{base}/{base} {base+1}/{base+1}/{base+1} {base+2}/{base+2}/{base+2}\n")
-                f.write(f"f {base}/{base}/{base} {base+2}/{base+2}/{base+2} {base+3}/{base+3}/{base+3}\n")
-            else:
-                f.write(f"f {base}/{base} {base+1}/{base+1} {base+2}/{base+2}\n")
-                f.write(f"f {base}/{base} {base+2}/{base+2} {base+3}/{base+3}\n")
-        else:
-            if normals:
-                f.write(f"f {base}//{base} {base+1}//{base+1} {base+2}//{base+2}\n")
-                f.write(f"f {base}//{base} {base+2}//{base+2} {base+3}//{base+3}\n")
-            else:
-                f.write(f"f {base} {base+1} {base+2}\n")
-                f.write(f"f {base} {base+2} {base+3}\n")
-    f.close()
-
-    # Write MTL file with texture reference
-    with open(mtl_file, 'w') as f:
-        f.write("# Material file with texture\n")
-        f.write("newmtl color_texture\n")
-        f.write("Ka 1.0 1.0 1.0\n")
-        f.write("Kd 1.0 1.0 1.0\n")
-        f.write("Ks 0.0 0.0 0.0\n")
-        f.write("Ns 0.0\n")
-        if colors and tex_width:
-            f.write(f"map_Kd {os.path.basename(texture_file)}\n")
-
-    print(f"[SplatCreator] OBJ+MTL written → {output_file}")
-
-
-# ============================================================
 # === Geometry Nodes–like Remeshing ==========================
 # ============================================================
 
@@ -366,12 +182,20 @@ def write_obj_with_vertex_colors(mesh, output_path):
         f.write(f"# Faces: {len(triangles)}\n")
         f.write(f"mtllib {mtl_name}\n")
         f.write("usemtl VertexColorMaterial\n\n")
+
+        def to_srgb(c):
+            return max(0, min(1, c ** (1.0/2.2)))
+
         
         # Write vertices with colors
         for i, v in enumerate(vertices):
             if colors is not None and i < len(colors):
                 # Write vertex with RGB color (0-1 range)
-                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {colors[i][0]:.6f} {colors[i][1]:.6f} {colors[i][2]:.6f}\n")
+                cr, cg, cb = colors[i]
+                cr, cg, cb = to_srgb(cr), to_srgb(cg), to_srgb(cb)
+
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {cr:.6f} {cg:.6f} {cb:.6f}\n")
+
             else:
                 # Write vertex without color
                 f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
@@ -416,7 +240,17 @@ def geometry_nodes_like_remesh(positions, colors=None, poisson_depth=10, smooth_
     if colors:
         pcd.colors = o3d.utility.Vector3dVector(colors_array)
     
-    # Optional voxel downsampling for uniformity
+    #add mising surface
+    print("[SplatCreator] Removing statistical outliers…")
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=40, std_ratio=1.8)
+
+    # Upsample splats to fill thin areas (this is the key fix)
+    print("[SplatCreator] Upsampling point cloud...")
+    pcd = pcd.uniform_down_sample(every_k_points=1)  # keep original
+    pcd = pcd.voxel_down_sample(0.005)  # re-densify
+    pcd.orient_normals_consistent_tangent_plane(k=40)
+
+    #downsampling
     if voxel_downsample > 0:
         pcd = pcd.voxel_down_sample(voxel_size=voxel_downsample)
         print(f"[SplatCreator] Voxel downsampled to {len(pcd.points)} points")
@@ -478,16 +312,18 @@ def geometry_nodes_like_remesh(positions, colors=None, poisson_depth=10, smooth_
 # ============================================================
 
 def convert_gaussian_ply_to_obj_and_remesh(ply_file, output_path):
-    # Handle both directory and file path inputs
-    if output_path.endswith('.obj'):
-        # It's a file path - use it directly for remeshed output
+    # Determine output directory
+    if output_path.lower().endswith('.obj'):
         output_dir = os.path.dirname(output_path)
-        remeshed_path = output_path
+        if output_path.lower().endswith('_mesh.obj'):
+            remeshed_path = output_path
+        else:
+            remeshed_path = output_path.replace('.obj', '_mesh.obj')
+
     else:
-        # It's a directory path
         output_dir = output_path
-        remeshed_path = os.path.join(output_dir, "gaussian_remeshed.obj")
-    
+        remeshed_path = os.path.join(output_path, "gaussian_mesh.obj")
+
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"[SplatCreator] Reading PLY: {ply_file}")
@@ -498,20 +334,20 @@ def convert_gaussian_ply_to_obj_and_remesh(ply_file, output_path):
     positions, normals = convert_to_unreal_coordinates(positions, normals)
 
     # Keep maximum detail for high-quality remesh - increased limit for more detail
-    if len(positions) > 200000:
-        positions, normals, colors = downsample_data(positions, normals, colors, 200000)
+    if len(positions) > 800000:
+        positions, normals, colors = downsample_data(positions, normals, colors, 800000)
         print(f"[SplatCreator] Downsampled to {len(positions)}")
 
+
     # Skip original OBJ, go straight to remesh
-    print("[SplatCreator] Performing ULTRA-HIGH QUALITY volumetric remesh...")
-    print("[SplatCreator] WARNING: This will take 10-20 minutes for maximum quality!")
+    print("[SplatCreator] Performing volumetric remesh...")
     # Parameters optimized for maximum detail
     mesh = geometry_nodes_like_remesh(
         positions, 
         colors, 
-        poisson_depth=13,       # Increased from 12 to 13 for more detail (very slow!)
-        smooth_iterations=3,    # Reduced smoothing to preserve more fine detail
-        voxel_downsample=0.001  # Finer sampling (was 0.002) for maximum resolution
+        poisson_depth=13,       # Very high detail
+        smooth_iterations=1,    # Minimal smoothing to preserve detail
+        voxel_downsample=0.001  # Very fine voxel resolution
     )
     
     # Use custom OBJ writer that properly embeds vertex colors

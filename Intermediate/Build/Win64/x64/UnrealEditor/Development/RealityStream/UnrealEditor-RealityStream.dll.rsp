@@ -64,6 +64,8 @@
 "../Intermediate/Build/Win64/x64/UnrealEditor/Development/ImageWrapper/UnrealEditor-ImageWrapper.lib"
 "../Intermediate/Build/Win64/x64/UnrealEditor/Development/WebSockets/UnrealEditor-WebSockets.lib"
 "../Plugins/Runtime/ProceduralMeshComponent/Intermediate/Build/Win64/x64/UnrealEditor/Development/ProceduralMeshComponent/UnrealEditor-ProceduralMeshComponent.lib"
+"../Intermediate/Build/Win64/x64/UnrealEditor/Development/Json/UnrealEditor-Json.lib"
+"../Intermediate/Build/Win64/x64/UnrealEditor/Development/JsonUtilities/UnrealEditor-JsonUtilities.lib"
 "delayimp.lib"
 "wininet.lib"
 "rpcrt4.lib"
