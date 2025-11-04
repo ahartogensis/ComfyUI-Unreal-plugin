@@ -62,6 +62,8 @@ void UComfyImageFetcher::StopPolling()
 	WebSocket.Reset();
 	ChunkBuffer.Empty();
 	bReceivingChunks = false;
+	AccumulatedPngMessages.Empty();
+	MessagesSinceLastFrame = 0;
 	SetConnectionStatus(EComfyConnectionStatus::Disconnected);
 }
 
@@ -74,6 +76,35 @@ bool UComfyImageFetcher::IsPolling() const
 // PNG SPLITTER (ROBUST CHUNK-BASED PARSER)
 // ============================================================
 
+// Checks if a PNG has RGB color type (color type 2 or 6) by reading IHDR chunk
+// Returns true if RGB/RGBA, false if grayscale or other
+// PNG IHDR structure (after 8-byte signature): [len:4][IHDR:4][width:4][height:4][bit_depth:1][color_type:1][compression:1][filter:1][interlace:1][crc:4]
+// Color type: 0=Grayscale, 2=RGB, 3=Indexed, 4=Grayscale+Alpha, 6=RGB+Alpha
+static bool IsPngRGB(const TArray<uint8>& PngData)
+{
+	const int32 N = PngData.Num();
+	if (N < 8) return false;
+	
+	// Check PNG signature
+	if (FMemory::Memcmp(PngData.GetData(), "\x89PNG\r\n\x1A\n", 8) != 0) return false;
+	
+	// IHDR should be at offset 8, with length 13
+	// Need: [len:4][IHDR:4][data:13][crc:4] = 25 bytes minimum
+	if (N < 25) return false;
+	
+	// Check IHDR chunk (bytes 8-11 should be length 0x0000000D = 13, bytes 12-15 should be "IHDR")
+	if (PngData[8] != 0 || PngData[9] != 0 || PngData[10] != 0 || PngData[11] != 0x0D) return false;
+	if (PngData[12] != 'I' || PngData[13] != 'H' || PngData[14] != 'D' || PngData[15] != 'R') return false;
+	
+	// Color type is at offset 25 (8 sig + 4 len + 4 type + 4 width + 4 height + 1 bit_depth = 25)
+	const uint8 ColorType = PngData[25];
+	
+	// Color type 2 = RGB, 6 = RGBA (both are RGB images)
+	bool bIsRGB = (ColorType == 2 || ColorType == 6);
+	
+	return bIsRGB;
+}
+
 // Parses a single PNG starting at StartIdx by walking chunks properly.
 // Returns end index (one-past-last byte) if valid PNG found, otherwise INDEX_NONE.
 static int32 ParseOnePNGAt(const TArray<uint8>& Buf, int32 StartIdx)
@@ -85,14 +116,25 @@ static int32 ParseOnePNGAt(const TArray<uint8>& Buf, int32 StartIdx)
 	if (FMemory::Memcmp(&Buf[StartIdx], Sig, 8) != 0) return INDEX_NONE;
 
 	int32 p = StartIdx + 8;
+	int32 ChunkCount = 0;
 
 	// Walk chunks: [len:4][type:4][data:len][crc:4]
 	while (true)
 	{
-		if (p + 8 > N) return INDEX_NONE; // Need len+type at minimum
+		if (p + 8 > N)
+		{
+			return INDEX_NONE; // Need len+type at minimum
+		}
 		
 		// Read big-endian length
 		uint32 Len = (uint32(Buf[p]) << 24) | (uint32(Buf[p + 1]) << 16) | (uint32(Buf[p + 2]) << 8) | uint32(Buf[p + 3]);
+		
+		// Sanity check: PNG chunks should not exceed ~10MB (most are much smaller)
+		const uint32 MaxReasonableChunkSize = 10 * 1024 * 1024; // 10MB
+		if (Len > MaxReasonableChunkSize)
+		{
+			return INDEX_NONE;
+		}
 		
 		// Check chunk type (IEND marks end of PNG)
 		char Type[4] = {(char)Buf[p + 4], (char)Buf[p + 5], (char)Buf[p + 6], (char)Buf[p + 7]};
@@ -100,17 +142,29 @@ static int32 ParseOnePNGAt(const TArray<uint8>& Buf, int32 StartIdx)
 		p += 8; // Past len+type
 
 		// Bounds check for data + CRC
-		if (p + int32(Len) + 4 > N) return INDEX_NONE;
+		if (p + int32(Len) + 4 > N)
+		{
+			return INDEX_NONE;
+		}
 
 		// Advance over data
 		p += int32(Len);
 		// Advance over CRC
 		p += 4;
+		
+		ChunkCount++;
 
 		// Found IEND chunk - PNG complete
 		if (Type[0] == 'I' && Type[1] == 'E' && Type[2] == 'N' && Type[3] == 'D')
 		{
 			return p; // p is one past last byte of PNG
+		}
+		
+		// Safety check - if we've parsed too many chunks without finding IEND, something is wrong
+		if (ChunkCount > 1000)
+		{
+			UE_LOG(LogTemp, Error, TEXT("[Comfy] Too many chunks (%d) without IEND, corrupted PNG"), ChunkCount);
+			return INDEX_NONE;
 		}
 	}
 }
@@ -134,14 +188,30 @@ TArray<TArray<uint8>> UComfyImageFetcher::SplitPNGStream(const TArray<uint8>& Bu
 			int32 End = ParseOnePNGAt(Buffer, i);
 			if (End == INDEX_NONE)
 			{
-				// Incomplete PNG - might be chunked, stop here
-				UE_LOG(LogTemp, Warning, TEXT("[Comfy] PNG signature found at offset %d but parser failed. Payload may be corrupted or incomplete."), i);
-				break;
+				// Corrupted PNG - search forward for the next PNG signature instead of breaking
+				bool bFoundNextSig = false;
+				for (int32 j = i + 8; j + 8 <= N; ++j)
+				{
+					if (Buffer[j] == Sig0 && Buffer[j + 1] == Sig1 && Buffer[j + 2] == Sig2 && Buffer[j + 3] == Sig3 &&
+						Buffer[j + 4] == Sig4 && Buffer[j + 5] == Sig5 && Buffer[j + 6] == Sig6 && Buffer[j + 7] == Sig7)
+					{
+						i = j - 1; // Will be incremented by loop, so set to j-1
+						bFoundNextSig = true;
+						break;
+					}
+				}
+				
+				if (!bFoundNextSig)
+				{
+					break;
+				}
+				continue;
 			}
 			
 			TArray<uint8> One;
 			One.Append(&Buffer[i], End - i);
 			Out.Add(MoveTemp(One));
+			
 			i = End; // Continue after this PNG
 		}
 		else
@@ -149,6 +219,7 @@ TArray<TArray<uint8>> UComfyImageFetcher::SplitPNGStream(const TArray<uint8>& Bu
 			++i;
 		}
 	}
+	
 	return Out;
 }
 
@@ -223,6 +294,56 @@ void UComfyImageFetcher::OnWebSocketMessage(const void* Data, SIZE_T Size, SIZE_
 	TArray<uint8> Copy;
 	Copy.Append(static_cast<const uint8*>(Data), Size);
 
+	// Dump raw websocket data
+	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] === WEBSOCKET DATA RECEIVED ==="));
+	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Chunk Size: %llu bytes, Bytes Remaining: %llu"), Size, BytesRemaining);
+	
+	// Hex dump of first 512 bytes (or full data if smaller)
+	const int32 DumpSize = FMath::Min((int32)Size, 512);
+	FString HexDump;
+	for (int32 i = 0; i < DumpSize; ++i)
+	{
+		HexDump += FString::Printf(TEXT("%02X "), Copy[i]);
+		if ((i + 1) % 16 == 0)
+		{
+			HexDump += TEXT("\n");
+		}
+	}
+	if (Size > 512)
+	{
+		HexDump += FString::Printf(TEXT("... (truncated, total %llu bytes)"), Size);
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Hex Dump (first %d bytes):\n%s"), DumpSize, *HexDump);
+	
+	// Try to interpret as string if it looks like text
+	if (Size > 0)
+	{
+		// Check if it starts with printable ASCII (JSON/text)
+		bool bLooksLikeText = true;
+		for (int32 i = 0; i < FMath::Min((int32)Size, 100); ++i)
+		{
+			uint8 Byte = Copy[i];
+			if (Byte < 32 && Byte != 9 && Byte != 10 && Byte != 13) // Not tab, newline, or carriage return
+			{
+				if (i < 4 || Byte != 0) // Allow nulls only if very early (might be binary header)
+				{
+					bLooksLikeText = false;
+					break;
+				}
+			}
+		}
+		
+		if (bLooksLikeText)
+		{
+			FString AsString = FString(UTF8_TO_TCHAR((const char*)Copy.GetData()));
+			const int32 StringPreviewSize = FMath::Min(AsString.Len(), 500);
+			if (StringPreviewSize > 0)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] As String (first %d chars): %s"), StringPreviewSize, *AsString.Left(StringPreviewSize));
+			}
+		}
+	}
+
 	AsyncTask(ENamedThreads::GameThread, [this, Copy, Size, BytesRemaining]()
 	{
 		if (!bReceivingChunks && ChunkBuffer.Num() > 0) ChunkBuffer.Empty();
@@ -231,13 +352,78 @@ void UComfyImageFetcher::OnWebSocketMessage(const void* Data, SIZE_T Size, SIZE_
 		if (BytesRemaining > 0)
 		{
 			bReceivingChunks = true;
+			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Chunk received, waiting for more... (buffer now: %d bytes)"), ChunkBuffer.Num());
 			return;
 		}
 
 		bReceivingChunks = false;
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Complete message received! Total size: %d bytes"), ChunkBuffer.Num());
+		
+		// Dump complete message when all chunks are received
+		if (ChunkBuffer.Num() > 0)
+		{
+			const int32 CompleteDumpSize = FMath::Min(ChunkBuffer.Num(), 1024);
+			FString CompleteHexDump;
+			for (int32 i = 0; i < CompleteDumpSize; ++i)
+			{
+				CompleteHexDump += FString::Printf(TEXT("%02X "), ChunkBuffer[i]);
+				if ((i + 1) % 16 == 0)
+				{
+					CompleteHexDump += TEXT("\n");
+				}
+			}
+			if (ChunkBuffer.Num() > 1024)
+			{
+				CompleteHexDump += FString::Printf(TEXT("... (truncated, total %d bytes)"), ChunkBuffer.Num());
+			}
+			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Complete Message Hex Dump (first %d bytes):\n%s"), CompleteDumpSize, *CompleteHexDump);
+		}
+		
 		ProcessImageData(ChunkBuffer);
 		ChunkBuffer.Empty();
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] === END WEBSOCKET DATA DUMP ==="));
 	});
+}
+
+// Helper function to check if data looks like JSON/text (not PNG)
+static bool IsJsonOrText(const TArray<uint8>& Data, int32 StartOffset = 0)
+{
+	if (StartOffset >= Data.Num()) return false;
+	
+	// Check if it starts with '{' (JSON) or is mostly printable ASCII
+	int32 CheckLen = FMath::Min(100, Data.Num() - StartOffset);
+	int32 PrintableCount = 0;
+	bool bStartsWithBrace = (Data[StartOffset] == '{');
+	
+	for (int32 i = StartOffset; i < StartOffset + CheckLen; ++i)
+	{
+		uint8 Byte = Data[i];
+		// Count printable ASCII (32-126) or common whitespace
+		if ((Byte >= 32 && Byte <= 126) || Byte == 9 || Byte == 10 || Byte == 13)
+		{
+			PrintableCount++;
+		}
+	}
+	
+	// If >80% printable and starts with '{', it's likely JSON
+	if (bStartsWithBrace && (PrintableCount * 100 / CheckLen) > 80)
+	{
+		return true;
+	}
+	
+	// If no PNG signature after header and mostly printable, it's text
+	if (!bStartsWithBrace && StartOffset + 8 < Data.Num())
+	{
+		// Check for PNG signature
+		bool bHasPngSig = (Data[StartOffset] == 0x89 && Data[StartOffset + 1] == 'P' && 
+		                   Data[StartOffset + 2] == 'N' && Data[StartOffset + 3] == 'G');
+		if (!bHasPngSig && (PrintableCount * 100 / CheckLen) > 70)
+		{
+			return true;
+		}
+	}
+	
+	return false;
 }
 
 void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
@@ -261,8 +447,13 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		if ((H1_BE == 1 && H2_BE == 2) || (H1_LE == 1 && H2_LE == 2))
 		{
 			Offset = 8;
-			UE_LOG(LogTemp, Verbose, TEXT("[Comfy] Recognized 8B header [1,2]"));
 		}
+	}
+
+	// Check if this is a JSON/text message (not PNG) - skip it
+	if (IsJsonOrText(In, Offset))
+	{
+		return;
 	}
 
 	// Handle optional tiny JSON preamble `{...}\n` (older WebViewer "meta")
@@ -278,8 +469,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			FString Type;
 			if (JsonObject->TryGetStringField(TEXT("type"), Type) && Type == TEXT("bundle"))
 			{
-				UE_LOG(LogTemp, Display, TEXT("[Comfy] Bundle received"));
-
 				const TArray<TSharedPtr<FJsonValue>>* ImagesArray;
 				if (JsonObject->TryGetArrayField(TEXT("images"), ImagesArray))
 				{
@@ -299,14 +488,10 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 
 						if (!IsValid(PngDecoder)) continue;
 						UTexture2D* Tex = PngDecoder->DecodePNGToTexture(Bytes);
-						if (!Tex)
+						if (Tex)
 						{
-							UE_LOG(LogTemp, Error, TEXT("[Comfy] Failed to decode %s frame"), *Name);
-							continue;
+							OnTextureReceived.Broadcast(Tex);
 						}
-
-						UE_LOG(LogTemp, Display, TEXT("[Comfy] %s frame decoded"), *Name);
-						OnTextureReceived.Broadcast(Tex);
 					}
 					return;
 				}
@@ -318,7 +503,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		{
 			if (In[i] == '}' && In[i + 1] == '\n')
 			{
-				UE_LOG(LogTemp, Verbose, TEXT("[Comfy] Stripped JSON preamble (%d..%d)"), Offset, i + 1);
 				Offset = i + 2;
 				break;
 			}
@@ -336,53 +520,242 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		Payload = In;
 	}
 
-	// Robustly split concatenated PNGs
-	auto Pngs = SplitPNGStream(Payload);
-	if (Pngs.Num() == 0)
+	// Check for PNG signature after the offset
+	if (Payload.Num() < 8 || 
+		Payload[0] != 0x89 || Payload[1] != 'P' || Payload[2] != 'N' || Payload[3] != 'G' ||
+		Payload[4] != 0x0D || Payload[5] != 0x0A || Payload[6] != 0x1A || Payload[7] != 0x0A)
 	{
-		// Check if there's a PNG signature at all
-		bool bHasSignature = false;
-		for (int32 i = 0; i < FMath::Min(Payload.Num(), 100); ++i)
-		{
-			if (Payload[i] == 0x89 && i + 7 < Payload.Num() &&
-				Payload[i + 1] == 'P' && Payload[i + 2] == 'N' && Payload[i + 3] == 'G')
-			{
-				bHasSignature = true;
-				break;
-			}
-		}
-		
-		if (bHasSignature)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Comfy] PNG signature found but parser failed. Payload may be corrupted or incomplete."));
-		}
-		else
-		{
-			UE_LOG(LogTemp, Error, TEXT("[Comfy] No PNG frames found in payload (%d bytes). No PNG signature detected."), Payload.Num());
-		}
 		return;
 	}
 
-	UE_LOG(LogTemp, Display, TEXT("[Comfy] Extracted %d PNG frame(s)"), Pngs.Num());
-
-	// Expected order from Comfy config: rgb, depth, mask
-	for (int32 i = 0; i < Pngs.Num(); ++i)
+	// Split concatenated PNGs
+	auto Pngs = SplitPNGStream(Payload);
+	
+	// If we got PNGs from this message, add them to accumulator
+	if (Pngs.Num() > 0)
 	{
-		if (!IsValid(PngDecoder))
+		for (auto& Png : Pngs)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decoder invalid during decode"));
+			AccumulatedPngMessages.Add(MoveTemp(Png));
+		}
+		
+		MessagesSinceLastFrame++;
+		
+		// Protection: If too many messages without completing a frame, clear accumulator
+		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Comfy] Stale frame detected (%d messages), clearing accumulator"), MessagesSinceLastFrame);
+			AccumulatedPngMessages.Empty();
+			MessagesSinceLastFrame = 0;
+		}
+		
+		// Protection: If accumulator grows too large, reset it
+		const int32 MaxAccumulatedPngs = ExpectedPngCount * 2;
+		if (AccumulatedPngMessages.Num() > MaxAccumulatedPngs)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Comfy] Accumulator overflow (%d PNGs), clearing"), AccumulatedPngMessages.Num());
+			AccumulatedPngMessages.Empty();
+			MessagesSinceLastFrame = 0;
 			return;
 		}
-
-		UTexture2D* Tex = PngDecoder->DecodePNGToTexture(Pngs[i]);
-		if (!Tex)
+		
+		// When we have all expected PNGs, process them in groups of 3
+		while (AccumulatedPngMessages.Num() >= ExpectedPngCount)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decode failed for frame %d (size %d)"), i, Pngs[i].Num());
-			continue;
-		}
+			// Check for duplicate PNGs BEFORE assignment
+			bool bFoundDuplicates = false;
+			for (int32 i = 0; i < ExpectedPngCount; ++i)
+			{
+				for (int32 j = i + 1; j < ExpectedPngCount; ++j)
+				{
+					if (AccumulatedPngMessages[i].Num() == AccumulatedPngMessages[j].Num())
+					{
+						if (FMemory::Memcmp(AccumulatedPngMessages[i].GetData(), 
+						                    AccumulatedPngMessages[j].GetData(), 
+						                    AccumulatedPngMessages[i].Num()) == 0)
+						{
+							UE_LOG(LogTemp, Warning, TEXT("[Comfy] Duplicate PNGs detected (indices %d and %d), skipping frame"), i, j);
+							bFoundDuplicates = true;
+							break;
+						}
+					}
+				}
+				if (bFoundDuplicates) break;
+			}
+			
+			if (bFoundDuplicates)
+			{
+				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+				MessagesSinceLastFrame = 0;
+				continue;
+			}
+			
+			// Identify PNGs by color type (most reliable), fallback to size-based assignment
+			TArray<int32> AssignedIndices;
+			AssignedIndices.SetNum(ExpectedPngCount);
+			AssignedIndices.Init(INDEX_NONE, ExpectedPngCount);
+			
+			// Check color type for each PNG
+			TArray<bool> IsRGB;
+			IsRGB.SetNum(ExpectedPngCount);
+			int32 RGBCount = 0;
+			int32 RGBIndex = INDEX_NONE;
+			
+			for (int32 i = 0; i < ExpectedPngCount; ++i)
+			{
+				IsRGB[i] = IsPngRGB(AccumulatedPngMessages[i]);
+				if (IsRGB[i])
+				{
+					RGBCount++;
+					RGBIndex = i;
+				}
+			}
+			
+			// Primary method: Use color type detection if exactly one RGB PNG is found
+			if (RGBCount == 1 && ExpectedPngCount == 3)
+			{
+				AssignedIndices[RGBIndex] = 0;
+				
+				// For the two grayscale PNGs, use size: larger = Depth, smaller = Mask
+				TArray<int32> GrayscaleIndices;
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					if (!IsRGB[i])
+					{
+						GrayscaleIndices.Add(i);
+					}
+				}
+				
+				// Sort grayscale by size (smallest to largest)
+				GrayscaleIndices.Sort([this](const int32& A, const int32& B) {
+					return AccumulatedPngMessages[A].Num() < AccumulatedPngMessages[B].Num();
+				});
+				
+				// Assign: smaller = Mask (index 2), larger = Depth (index 1)
+				if (GrayscaleIndices.Num() == 2)
+				{
+					AssignedIndices[GrayscaleIndices[0]] = 2; // Smaller = Mask
+					AssignedIndices[GrayscaleIndices[1]] = 1; // Larger = Depth
+				}
+				else
+				{
+					// Fall through to size-based fallback
+					RGBCount = 0;
+				}
+			}
+			
+			// Fallback: Use size-based assignment if color type detection doesn't work
+			if (RGBCount != 1 || ExpectedPngCount != 3)
+			{
+				TArray<int32> SizeOrder;
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					SizeOrder.Add(i);
+				}
+				// Sort indices by PNG size (smallest to largest)
+				SizeOrder.Sort([this](const int32& A, const int32& B) {
+					return AccumulatedPngMessages[A].Num() < AccumulatedPngMessages[B].Num();
+				});
+				
+				if (SizeOrder.Num() == 3)
+				{
+					AssignedIndices[SizeOrder[0]] = 2; // Smallest = Mask
+					AssignedIndices[SizeOrder[1]] = 1; // Medium = Depth
+					AssignedIndices[SizeOrder[2]] = 0; // Largest = RGB
+				}
+				else
+				{
+					// Fallback to sequential
+					for (int32 i = 0; i < ExpectedPngCount; ++i)
+					{
+						AssignedIndices[i] = i;
+					}
+				}
+			}
+			
+			// Validate assignment: Ensure RGB and Depth are assigned to different accumulator indices
+			int32 RGBAccumIdx = INDEX_NONE;
+			int32 DepthAccumIdx = INDEX_NONE;
+			for (int32 i = 0; i < ExpectedPngCount; ++i)
+			{
+				if (AssignedIndices[i] == 0) RGBAccumIdx = i;
+				if (AssignedIndices[i] == 1) DepthAccumIdx = i;
+			}
+			
+			if (RGBAccumIdx != INDEX_NONE && DepthAccumIdx != INDEX_NONE && RGBAccumIdx == DepthAccumIdx)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[Comfy] RGB and Depth assigned to same index, skipping frame"));
+				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+				MessagesSinceLastFrame = 0;
+				return;
+			}
+			
+			// Decode all PNGs first, then broadcast in correct order (RGB, Depth, Mask)
+			TArray<UTexture2D*> DecodedTextures;
+			DecodedTextures.SetNum(ExpectedPngCount);
+			
+			// First pass: decode all PNGs
+			for (int32 i = 0; i < ExpectedPngCount; ++i)
+			{
+				if (!IsValid(PngDecoder))
+				{
+					UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decoder invalid during decode"));
+					AccumulatedPngMessages.Empty();
+					return;
+				}
 
-		UE_LOG(LogTemp, Display, TEXT("[Comfy] Frame %d decoded OK"), i);
-		OnTextureReceived.Broadcast(Tex);
+				UTexture2D* Tex = PngDecoder->DecodePNGToTexture(AccumulatedPngMessages[i]);
+				if (!Tex)
+				{
+					UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decode failed for frame %d (size %d bytes)"), i, AccumulatedPngMessages[i].Num());
+					AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+					MessagesSinceLastFrame = 0;
+					return;
+				}
+
+				DecodedTextures[i] = Tex;
+			}
+			
+			// Second pass: broadcast in correct order (RGB=0, Depth=1, Mask=2)
+			for (int32 BroadcastIndex = 0; BroadcastIndex < ExpectedPngCount; ++BroadcastIndex)
+			{
+				// Find which accumulator index corresponds to this broadcast index
+				int32 AccumulatorIndex = INDEX_NONE;
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					if (AssignedIndices[i] == BroadcastIndex)
+					{
+						AccumulatorIndex = i;
+						break;
+					}
+				}
+				
+				if (AccumulatorIndex == INDEX_NONE || !DecodedTextures[AccumulatorIndex])
+				{
+					continue;
+				}
+				
+				// Verify RGB is actually RGB before broadcasting Index 0
+				if (BroadcastIndex == 0)
+				{
+					bool bIsActuallyRGB = IsPngRGB(AccumulatedPngMessages[AccumulatorIndex]);
+					if (!bIsActuallyRGB)
+					{
+						continue;
+					}
+				}
+				
+				OnTextureReceived.Broadcast(DecodedTextures[AccumulatorIndex]);
+			}
+			
+			// Remove processed PNGs from accumulator
+			AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+			MessagesSinceLastFrame = 0;
+		}
+	}
+	else if (Pngs.Num() == 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG signature present but SplitPNGStream returned 0 PNGs"));
 	}
 }
 

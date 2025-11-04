@@ -57,6 +57,15 @@ private:
 	TArray<uint8> ChunkBuffer;
 	bool bReceivingChunks = false;
 
+	// Accumulate PNG messages until we have all 3 (RGB, Depth, Mask)
+	TArray<TArray<uint8>> AccumulatedPngMessages;
+	static constexpr int32 ExpectedPngCount = 3;
+	
+	// Track messages received since last successful frame processing
+	// Used to detect when accumulator is stuck with partial/incomplete frames
+	int32 MessagesSinceLastFrame = 0;
+	static constexpr int32 MaxMessagesBeforeClear = 10; // Clear accumulator if 10+ messages without completing a frame
+
 	//WebSocket events (may be called from worker threads)
 	void OnWebSocketConnected();
 	void OnWebSocketConnectionError(const FString& Error);

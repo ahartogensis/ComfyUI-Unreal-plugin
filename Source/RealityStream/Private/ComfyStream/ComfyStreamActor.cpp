@@ -150,6 +150,8 @@ void AComfyStreamActor::HandleStreamTexture(UTexture2D* Texture)
 		return;
 
 	const int32 Index = SeqIndex % 3;
+	UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] HandleStreamTexture: Received texture, assigning to Index %d (SeqIndex: %d), texture size: %dx%d"), 
+		Index, SeqIndex, Texture->GetSizeX(), Texture->GetSizeY());
 	FrameBuffer->PushTexture(Texture, Index);
 	SeqIndex++;
 
