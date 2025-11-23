@@ -10,6 +10,7 @@
 			"ComfyStreamActor.gen.cpp.obj",
 			"ComfyStreamComponent.gen.cpp.obj",
 			"ComfyStreamTypes.gen.cpp.obj",
+			"Hyper3DObjectsSubsystem.gen.cpp.obj",
 			"RealityStream.init.gen.cpp.obj",
 			"SplatCreatorSubsystem.gen.cpp.obj",
 			"PerModuleInline.gen.cpp.obj",
@@ -19,6 +20,7 @@
 			"ComfyReconstruction.cpp.obj",
 			"ComfyStreamActor.cpp.obj",
 			"ComfyStreamComponent.cpp.obj",
+			"Hyper3DObjectsSubsystem.cpp.obj",
 			"SplatCreatorCommand.cpp.obj",
 			"SplatCreatorSubsystem.cpp.obj",
 			"RealityStream.cpp.obj"

@@ -1,0 +1,29 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.RealityStream.cpp.obj": [
+			"ComfyFrameBuffer.gen.cpp.obj",
+			"ComfyFrameBundle.gen.cpp.obj",
+			"ComfyImageFetcher.gen.cpp.obj",
+			"ComfyPngDecoder.gen.cpp.obj",
+			"ComfyReconstruction.gen.cpp.obj",
+			"ComfyStreamActor.gen.cpp.obj",
+			"ComfyStreamComponent.gen.cpp.obj",
+			"ComfyStreamTypes.gen.cpp.obj",
+			"MeshLanternSubsystem.gen.cpp.obj",
+			"RealityStream.init.gen.cpp.obj",
+			"SplatCreatorSubsystem.gen.cpp.obj",
+			"PerModuleInline.gen.cpp.obj",
+			"ComfyFrameBuffer.cpp.obj",
+			"ComfyImageFetcher.cpp.obj",
+			"ComfyPngDecoder.cpp.obj",
+			"ComfyReconstruction.cpp.obj",
+			"ComfyStreamActor.cpp.obj",
+			"ComfyStreamComponent.cpp.obj",
+			"MeshLanternSubsystem.cpp.obj",
+			"SplatCreatorCommand.cpp.obj",
+			"SplatCreatorSubsystem.cpp.obj",
+			"RealityStream.cpp.obj"
+		]
+	}
+}

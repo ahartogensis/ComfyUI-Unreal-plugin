@@ -24,18 +24,7 @@ void USplatCreatorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
     // Reset shutdown flag
     bIsShuttingDown = false;
-
-    StartDockerContainer();
-    ScanForPLYFiles();
-
-    // Start 45-second loop
-    GetWorld()->GetTimerManager().SetTimer(
-        LoopTimer,
-        this,
-        &USplatCreatorSubsystem::CycleMeshes,
-        45.0f,
-        true
-    );
+    bHasStartedImportLoop = false;
 }
 
 void USplatCreatorSubsystem::Deinitialize()
@@ -55,6 +44,8 @@ void USplatCreatorSubsystem::Deinitialize()
 		CurrentMeshActor->Destroy();
 		CurrentMeshActor = nullptr;
 	}
+
+	bHasStartedImportLoop = false;
 
 	// Stop the Docker container when play stops (non-blocking, but set flag first)
 	StopDockerContainer();
@@ -254,6 +245,31 @@ void USplatCreatorSubsystem::ScanForPLYFiles()
     UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d mesh files (PLY/OBJ)"), PlyFiles.Num());
 }
 
+void USplatCreatorSubsystem::StartAutoCycleTimer()
+{
+    if (LoopTimer.IsValid())
+    {
+        return;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World || !World->IsGameWorld())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start cycle timer - invalid world context"));
+        return;
+    }
+
+    World->GetTimerManager().SetTimer(
+        LoopTimer,
+        this,
+        &USplatCreatorSubsystem::CycleMeshes,
+        45.0f,
+        true
+    );
+
+    UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Auto cycle timer started"));
+}
+
 void USplatCreatorSubsystem::CycleMeshes()
 {
     if (PlyFiles.Num() == 0) return;
@@ -427,7 +443,14 @@ void USplatCreatorSubsystem::CycleMeshes()
 void USplatCreatorSubsystem::CheckAndImportSplat(const FString& VideoPath)
 {
 	const FString OutputDir = GetOutputDirectory();
-	
+
+	if (!bHasStartedImportLoop)
+	{
+		StartDockerContainer();
+		StartAutoCycleTimer();
+		bHasStartedImportLoop = true;
+	}
+ 
 	// Scan for any PLY or OBJ files
 	TArray<FString> FoundPlyFiles;
 	TArray<FString> FoundObjFiles;

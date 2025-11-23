@@ -1,0 +1,21 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\private\\comfystream\\comfystreamcomponent.cpp",
+        "ProvidedModule": "",
+        "PCH": "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\intermediate\\build\\win64\\x64\\reconstruction_3deditor\\development\\unrealed\\sharedpch.unrealed.project.valapi.valexpapi.cpp20.h.pch",
+        "Includes": [
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\realitystream\\definitions.realitystream.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\public\\comfystream\\comfystreamcomponent.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\public\\comfystream\\comfystreamtypes.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\unrealeditor\\inc\\realitystream\\uht\\comfystreamtypes.generated.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\unrealeditor\\inc\\realitystream\\uht\\comfystreamcomponent.generated.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\public\\comfystream\\comfyimagefetcher.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\unrealeditor\\inc\\realitystream\\uht\\comfyimagefetcher.generated.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\public\\comfystream\\comfypngdecoder.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\unrealeditor\\inc\\realitystream\\uht\\comfypngdecoder.generated.h"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}

@@ -42,7 +42,9 @@ public class RealityStream : ModuleRules
                     "InputCore",
                     "Projects",
                     "EditorStyle",
-                    "LevelEditor"
+                    "LevelEditor",
+                    "AssetTools",
+                    "AssetRegistry"
                 }
             );
         }

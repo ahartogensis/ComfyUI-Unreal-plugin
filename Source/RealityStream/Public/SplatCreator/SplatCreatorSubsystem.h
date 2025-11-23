@@ -36,6 +36,9 @@ private:
 	bool EnsureDockerContainerRunning();
 	void ScanForPLYFiles();
 	void CycleMeshes();
+	void StartAutoCycleTimer();
+
+	bool bHasStartedImportLoop = false;
 
 	// Convert current PLY to OBJ
 	void ConvertCurrentPLY();

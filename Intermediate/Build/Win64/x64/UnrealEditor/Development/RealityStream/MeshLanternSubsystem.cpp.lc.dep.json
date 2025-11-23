@@ -1,0 +1,20 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\private\\meshimport\\meshlanternsubsystem.cpp",
+        "ProvidedModule": "",
+        "PCH": "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\intermediate\\build\\win64\\x64\\reconstruction_3deditor\\development\\unrealed\\sharedpch.unrealed.project.valapi.valexpapi.cpp20.h.pch",
+        "Includes": [
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\realitystream\\definitions.realitystream.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\source\\realitystream\\public\\meshimport\\meshlanternsubsystem.h",
+            "c:\\users\\alexi\\onedrive\\documents\\unreal projects\\reconstruction_3d\\plugins\\realitystream\\intermediate\\build\\win64\\unrealeditor\\inc\\realitystream\\uht\\meshlanternsubsystem.generated.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\plugins\\runtime\\proceduralmeshcomponent\\source\\proceduralmeshcomponent\\public\\proceduralmeshcomponent.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\plugins\\runtime\\proceduralmeshcomponent\\intermediate\\build\\win64\\unrealeditor\\inc\\proceduralmeshcomponent\\uht\\proceduralmeshcomponent.generated.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\source\\runtime\\imagewrapper\\public\\iimagewrapper.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\source\\runtime\\imagewrapper\\public\\imagewrapperoutputtypes.h",
+            "c:\\program files\\epic games\\ue_5.6\\engine\\source\\runtime\\imagewrapper\\public\\iimagewrappermodule.h"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}
