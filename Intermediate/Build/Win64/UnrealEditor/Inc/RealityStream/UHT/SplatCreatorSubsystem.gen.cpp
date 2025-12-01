@@ -19,65 +19,48 @@ REALITYSTREAM_API UClass* Z_Construct_UClass_USplatCreatorSubsystem_NoRegister()
 UPackage* Z_Construct_UPackage__Script_RealityStream();
 // ********** End Cross Module References **********************************************************
 
-// ********** Begin Class USplatCreatorSubsystem Function CheckAndImportSplat **********************
-struct Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics
+// ********** Begin Class USplatCreatorSubsystem Function StartPointCloudSystem ********************
+struct Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem_Statics
 {
-	struct SplatCreatorSubsystem_eventCheckAndImportSplat_Parms
-	{
-		FString VideoPath;
-	};
 #if WITH_METADATA
 	static constexpr UECodeGen_Private::FMetaDataPairParam Function_MetaDataParams[] = {
 		{ "Category", "SplatCreator" },
 #if !UE_BUILD_SHIPPING
-		{ "Comment", "//Entry point: Reconstruct video \xe2\x86\x92 spawn Gaussian mesh or import existing PLY \n" },
+		{ "Comment", "// Start the point cloud system - CALL THIS FROM BLUEPRINT to initialize\n// In Blueprint: Get Splat Creator Subsystem -> Start Point Cloud System\n" },
 #endif
-		{ "CPP_Default_VideoPath", "" },
 		{ "ModuleRelativePath", "Public/SplatCreator/SplatCreatorSubsystem.h" },
 #if !UE_BUILD_SHIPPING
-		{ "ToolTip", "Entry point: Reconstruct video \xe2\x86\x92 spawn Gaussian mesh or import existing PLY" },
+		{ "ToolTip", "Start the point cloud system - CALL THIS FROM BLUEPRINT to initialize\nIn Blueprint: Get Splat Creator Subsystem -> Start Point Cloud System" },
 #endif
 	};
-	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_VideoPath_MetaData[] = {
-		{ "NativeConst", "" },
-	};
 #endif // WITH_METADATA
-	static const UECodeGen_Private::FStrPropertyParams NewProp_VideoPath;
-	static const UECodeGen_Private::FPropertyParamsBase* const PropPointers[];
 	static const UECodeGen_Private::FFunctionParams FuncParams;
 };
-const UECodeGen_Private::FStrPropertyParams Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::NewProp_VideoPath = { "VideoPath", nullptr, (EPropertyFlags)0x0010000000000080, UECodeGen_Private::EPropertyGenFlags::Str, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(SplatCreatorSubsystem_eventCheckAndImportSplat_Parms, VideoPath), METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_VideoPath_MetaData), NewProp_VideoPath_MetaData) };
-const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::PropPointers[] = {
-	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::NewProp_VideoPath,
-};
-static_assert(UE_ARRAY_COUNT(Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::PropPointers) < 2048);
-const UECodeGen_Private::FFunctionParams Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::FuncParams = { { (UObject*(*)())Z_Construct_UClass_USplatCreatorSubsystem, nullptr, "CheckAndImportSplat", Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::PropPointers, UE_ARRAY_COUNT(Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::PropPointers), sizeof(Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::SplatCreatorSubsystem_eventCheckAndImportSplat_Parms), RF_Public|RF_Transient|RF_MarkAsNative, (EFunctionFlags)0x04020401, 0, 0, METADATA_PARAMS(UE_ARRAY_COUNT(Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::Function_MetaDataParams), Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::Function_MetaDataParams)},  };
-static_assert(sizeof(Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::SplatCreatorSubsystem_eventCheckAndImportSplat_Parms) < MAX_uint16);
-UFunction* Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat()
+const UECodeGen_Private::FFunctionParams Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem_Statics::FuncParams = { { (UObject*(*)())Z_Construct_UClass_USplatCreatorSubsystem, nullptr, "StartPointCloudSystem", nullptr, 0, 0, RF_Public|RF_Transient|RF_MarkAsNative, (EFunctionFlags)0x04020401, 0, 0, METADATA_PARAMS(UE_ARRAY_COUNT(Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem_Statics::Function_MetaDataParams), Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem_Statics::Function_MetaDataParams)},  };
+UFunction* Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem()
 {
 	static UFunction* ReturnFunction = nullptr;
 	if (!ReturnFunction)
 	{
-		UECodeGen_Private::ConstructUFunction(&ReturnFunction, Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat_Statics::FuncParams);
+		UECodeGen_Private::ConstructUFunction(&ReturnFunction, Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem_Statics::FuncParams);
 	}
 	return ReturnFunction;
 }
-DEFINE_FUNCTION(USplatCreatorSubsystem::execCheckAndImportSplat)
+DEFINE_FUNCTION(USplatCreatorSubsystem::execStartPointCloudSystem)
 {
-	P_GET_PROPERTY(FStrProperty,Z_Param_VideoPath);
 	P_FINISH;
 	P_NATIVE_BEGIN;
-	P_THIS->CheckAndImportSplat(Z_Param_VideoPath);
+	P_THIS->StartPointCloudSystem();
 	P_NATIVE_END;
 }
-// ********** End Class USplatCreatorSubsystem Function CheckAndImportSplat ************************
+// ********** End Class USplatCreatorSubsystem Function StartPointCloudSystem **********************
 
 // ********** Begin Class USplatCreatorSubsystem ***************************************************
 void USplatCreatorSubsystem::StaticRegisterNativesUSplatCreatorSubsystem()
 {
 	UClass* Class = USplatCreatorSubsystem::StaticClass();
 	static const FNameNativePtrPair Funcs[] = {
-		{ "CheckAndImportSplat", &USplatCreatorSubsystem::execCheckAndImportSplat },
+		{ "StartPointCloudSystem", &USplatCreatorSubsystem::execStartPointCloudSystem },
 	};
 	FNativeFunctionRegistrar::RegisterFunctions(Class, Funcs, UE_ARRAY_COUNT(Funcs));
 }
@@ -121,7 +104,7 @@ struct Z_Construct_UClass_USplatCreatorSubsystem_Statics
 #endif // WITH_METADATA
 	static UObject* (*const DependentSingletons[])();
 	static constexpr FClassFunctionLinkInfo FuncInfo[] = {
-		{ &Z_Construct_UFunction_USplatCreatorSubsystem_CheckAndImportSplat, "CheckAndImportSplat" }, // 804785288
+		{ &Z_Construct_UFunction_USplatCreatorSubsystem_StartPointCloudSystem, "StartPointCloudSystem" }, // 4248716846
 	};
 	static_assert(UE_ARRAY_COUNT(FuncInfo) < 2048);
 	static constexpr FCppClassTypeInfoStatic StaticCppClassTypeInfo = {
@@ -166,10 +149,10 @@ USplatCreatorSubsystem::~USplatCreatorSubsystem() {}
 struct Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_SplatCreator_SplatCreatorSubsystem_h__Script_RealityStream_Statics
 {
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
-		{ Z_Construct_UClass_USplatCreatorSubsystem, USplatCreatorSubsystem::StaticClass, TEXT("USplatCreatorSubsystem"), &Z_Registration_Info_UClass_USplatCreatorSubsystem, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(USplatCreatorSubsystem), 1613034843U) },
+		{ Z_Construct_UClass_USplatCreatorSubsystem, USplatCreatorSubsystem::StaticClass, TEXT("USplatCreatorSubsystem"), &Z_Registration_Info_UClass_USplatCreatorSubsystem, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(USplatCreatorSubsystem), 2124018205U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_SplatCreator_SplatCreatorSubsystem_h__Script_RealityStream_1976723653(TEXT("/Script/RealityStream"),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_SplatCreator_SplatCreatorSubsystem_h__Script_RealityStream_438118672(TEXT("/Script/RealityStream"),
 	Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_SplatCreator_SplatCreatorSubsystem_h__Script_RealityStream_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_SplatCreator_SplatCreatorSubsystem_h__Script_RealityStream_Statics::ClassInfo),
 	nullptr, 0,
 	nullptr, 0);

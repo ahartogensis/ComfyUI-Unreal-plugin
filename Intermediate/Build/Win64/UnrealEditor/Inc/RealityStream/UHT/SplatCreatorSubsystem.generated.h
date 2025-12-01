@@ -18,7 +18,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
 // ********** Begin Class USplatCreatorSubsystem ***************************************************
 #define FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_SplatCreator_SplatCreatorSubsystem_h_12_RPC_WRAPPERS_NO_PURE_DECLS \
-	DECLARE_FUNCTION(execCheckAndImportSplat);
+	DECLARE_FUNCTION(execStartPointCloudSystem);
 
 
 REALITYSTREAM_API UClass* Z_Construct_UClass_USplatCreatorSubsystem_NoRegister();

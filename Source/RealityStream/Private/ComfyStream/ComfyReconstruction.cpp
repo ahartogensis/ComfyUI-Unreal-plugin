@@ -36,7 +36,10 @@ bool UComfyReconstruction::AverageNormalizedDepth(
 
 	const FColor* DepthPtr = nullptr;
 	int32 W=0, H=0;
-	if (!LockReadFColor(DepthTex, DepthPtr, W, H)) return false;
+	if (!LockReadFColor(DepthTex, DepthPtr, W, H))
+	{
+		return false;
+	}
 
 	bool bMaskLocked = false;
 	const FColor* MaskPtr = nullptr;
@@ -49,6 +52,12 @@ bool UComfyReconstruction::AverageNormalizedDepth(
 			return false;
 		}
 		bMaskLocked = true;
+	}
+
+	if (!DepthPtr) 
+	{
+		if (bMaskLocked && MaskTex) Unlock(MaskTex);
+		return false;
 	}
 
 	double Sum = 0.0;
@@ -92,31 +101,23 @@ bool UComfyReconstruction::AverageNormalizedDepth(
 bool UComfyReconstruction::LockReadFColor(UTexture2D* Tex,
 	const FColor*& OutPtr, int32& OutW, int32& OutH)
 {
-	if (!Tex || !IsValid(Tex))
-		return false;
-
-	// Ensure texture is ready
-	if (!Tex->GetPlatformData())
-		return false;
-
-	FTexturePlatformData* PlatformData = Tex->GetPlatformData();
-	if (!PlatformData || PlatformData->Mips.Num() == 0)
-		return false;
-
+	if (!Tex) return false;
+	
 	// Ensure we're on the game thread for texture operations
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[ComfyReconstruction] LockReadFColor called from non-game thread!"));
 		return false;
 	}
 
+	FTexturePlatformData* PlatformData = Tex->GetPlatformData();
+	if (!PlatformData || PlatformData->Mips.Num() == 0) return false;
+	
 	FTexture2DMipMap& Mip = PlatformData->Mips[0];
-	if (!Mip.BulkData.GetBulkDataSize())
-		return false;
+	if (!Mip.BulkData.GetBulkDataSize()) return false;
 
 	OutPtr = static_cast<const FColor*>(Mip.BulkData.LockReadOnly());
 	if (!OutPtr) return false;
-
+	
 	OutW = Tex->GetSizeX();
 	OutH = Tex->GetSizeY();
 	return true;
@@ -124,22 +125,15 @@ bool UComfyReconstruction::LockReadFColor(UTexture2D* Tex,
 
 void UComfyReconstruction::Unlock(UTexture2D* Tex)
 {
-	if (!Tex || !IsValid(Tex))
-		return;
-
-	if (!Tex->GetPlatformData())
-		return;
-
-	FTexturePlatformData* PlatformData = Tex->GetPlatformData();
-	if (!PlatformData || PlatformData->Mips.Num() == 0)
-		return;
-
+	if (!Tex) return;
+	
 	// Ensure we're on the game thread for texture operations
 	if (!IsInGameThread())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[ComfyReconstruction] Unlock called from non-game thread!"));
 		return;
 	}
-
+	
+	FTexturePlatformData* PlatformData = Tex->GetPlatformData();
+	if (!PlatformData || PlatformData->Mips.Num() == 0) return;
 	PlatformData->Mips[0].BulkData.Unlock();
 }

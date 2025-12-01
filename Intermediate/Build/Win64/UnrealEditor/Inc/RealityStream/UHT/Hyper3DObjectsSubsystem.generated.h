@@ -18,6 +18,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 
 // ********** Begin Class UHyper3DObjectsSubsystem *************************************************
 #define FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_MeshImport_Hyper3DObjectsSubsystem_h_18_RPC_WRAPPERS_NO_PURE_DECLS \
+	DECLARE_FUNCTION(execSetReferenceLocation); \
 	DECLARE_FUNCTION(execDeactivateObjectImports); \
 	DECLARE_FUNCTION(execActivateObjectImports);
 

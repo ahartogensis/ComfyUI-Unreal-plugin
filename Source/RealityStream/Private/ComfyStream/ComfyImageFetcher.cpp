@@ -36,20 +36,12 @@ void UComfyImageFetcher::StartPolling(const FString& ServerURL, int32 ChannelNum
 
 	WebSocket = FWebSocketsModule::Get().CreateWebSocket(WebSocketURL);
 
-	if (WebSocket.IsValid())
-	{
-		WebSocket->OnConnected().AddUObject(this, &UComfyImageFetcher::OnWebSocketConnected);
-		WebSocket->OnConnectionError().AddUObject(this, &UComfyImageFetcher::OnWebSocketConnectionError);
-		WebSocket->OnClosed().AddUObject(this, &UComfyImageFetcher::OnWebSocketClosed);
-		WebSocket->OnRawMessage().AddUObject(this, &UComfyImageFetcher::OnWebSocketMessage);
+	WebSocket->OnConnected().AddUObject(this, &UComfyImageFetcher::OnWebSocketConnected);
+	WebSocket->OnConnectionError().AddUObject(this, &UComfyImageFetcher::OnWebSocketConnectionError);
+	WebSocket->OnClosed().AddUObject(this, &UComfyImageFetcher::OnWebSocketClosed);
+	WebSocket->OnRawMessage().AddUObject(this, &UComfyImageFetcher::OnWebSocketMessage);
 
-		WebSocket->Connect();
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] Failed to create WebSocket"));
-		SetConnectionStatus(EComfyConnectionStatus::Error);
-	}
+	WebSocket->Connect();
 }
 
 void UComfyImageFetcher::StopPolling()
@@ -163,7 +155,6 @@ static int32 ParseOnePNGAt(const TArray<uint8>& Buf, int32 StartIdx)
 		// Safety check - if we've parsed too many chunks without finding IEND, something is wrong
 		if (ChunkCount > 1000)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[Comfy] Too many chunks (%d) without IEND, corrupted PNG"), ChunkCount);
 			return INDEX_NONE;
 		}
 	}
@@ -251,7 +242,6 @@ void UComfyImageFetcher::OnWebSocketConnectionError(const FString& Error)
 
 void UComfyImageFetcher::OnWebSocketConnectionError_GameThread(const FString& Error)
 {
-	UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] WebSocket connection error: %s"), *Error);
 	SetConnectionStatus(EComfyConnectionStatus::Error);
 	OnError.Broadcast(Error);
 }
@@ -266,8 +256,6 @@ void UComfyImageFetcher::OnWebSocketClosed(int32 StatusCode, const FString& Reas
 
 void UComfyImageFetcher::OnWebSocketClosed_GameThread(int32 StatusCode, const FString& Reason, bool bWasClean)
 {
-	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] WebSocket closed. Code: %d, Reason: %s, Clean: %s"), 
-		StatusCode, *Reason, bWasClean ? TEXT("Yes") : TEXT("No"));
 	SetConnectionStatus(EComfyConnectionStatus::Disconnected);
 }
 
@@ -294,56 +282,6 @@ void UComfyImageFetcher::OnWebSocketMessage(const void* Data, SIZE_T Size, SIZE_
 	TArray<uint8> Copy;
 	Copy.Append(static_cast<const uint8*>(Data), Size);
 
-	// Dump raw websocket data
-	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] === WEBSOCKET DATA RECEIVED ==="));
-	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Chunk Size: %llu bytes, Bytes Remaining: %llu"), Size, BytesRemaining);
-	
-	// Hex dump of first 512 bytes (or full data if smaller)
-	const int32 DumpSize = FMath::Min((int32)Size, 512);
-	FString HexDump;
-	for (int32 i = 0; i < DumpSize; ++i)
-	{
-		HexDump += FString::Printf(TEXT("%02X "), Copy[i]);
-		if ((i + 1) % 16 == 0)
-		{
-			HexDump += TEXT("\n");
-		}
-	}
-	if (Size > 512)
-	{
-		HexDump += FString::Printf(TEXT("... (truncated, total %llu bytes)"), Size);
-	}
-	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Hex Dump (first %d bytes):\n%s"), DumpSize, *HexDump);
-	
-	// Try to interpret as string if it looks like text
-	if (Size > 0)
-	{
-		// Check if it starts with printable ASCII (JSON/text)
-		bool bLooksLikeText = true;
-		for (int32 i = 0; i < FMath::Min((int32)Size, 100); ++i)
-		{
-			uint8 Byte = Copy[i];
-			if (Byte < 32 && Byte != 9 && Byte != 10 && Byte != 13) // Not tab, newline, or carriage return
-			{
-				if (i < 4 || Byte != 0) // Allow nulls only if very early (might be binary header)
-				{
-					bLooksLikeText = false;
-					break;
-				}
-			}
-		}
-		
-		if (bLooksLikeText)
-		{
-			FString AsString = FString(UTF8_TO_TCHAR((const char*)Copy.GetData()));
-			const int32 StringPreviewSize = FMath::Min(AsString.Len(), 500);
-			if (StringPreviewSize > 0)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] As String (first %d chars): %s"), StringPreviewSize, *AsString.Left(StringPreviewSize));
-			}
-		}
-	}
-
 	AsyncTask(ENamedThreads::GameThread, [this, Copy, Size, BytesRemaining]()
 	{
 		if (!bReceivingChunks && ChunkBuffer.Num() > 0) ChunkBuffer.Empty();
@@ -352,36 +290,13 @@ void UComfyImageFetcher::OnWebSocketMessage(const void* Data, SIZE_T Size, SIZE_
 		if (BytesRemaining > 0)
 		{
 			bReceivingChunks = true;
-			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Chunk received, waiting for more... (buffer now: %d bytes)"), ChunkBuffer.Num());
 			return;
 		}
 
 		bReceivingChunks = false;
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Complete message received! Total size: %d bytes"), ChunkBuffer.Num());
-		
-		// Dump complete message when all chunks are received
-		if (ChunkBuffer.Num() > 0)
-		{
-			const int32 CompleteDumpSize = FMath::Min(ChunkBuffer.Num(), 1024);
-			FString CompleteHexDump;
-			for (int32 i = 0; i < CompleteDumpSize; ++i)
-			{
-				CompleteHexDump += FString::Printf(TEXT("%02X "), ChunkBuffer[i]);
-				if ((i + 1) % 16 == 0)
-				{
-					CompleteHexDump += TEXT("\n");
-				}
-			}
-			if (ChunkBuffer.Num() > 1024)
-			{
-				CompleteHexDump += FString::Printf(TEXT("... (truncated, total %d bytes)"), ChunkBuffer.Num());
-			}
-			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Complete Message Hex Dump (first %d bytes):\n%s"), CompleteDumpSize, *CompleteHexDump);
-		}
 		
 		ProcessImageData(ChunkBuffer);
 		ChunkBuffer.Empty();
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] === END WEBSOCKET DATA DUMP ==="));
 	});
 }
 
@@ -429,11 +344,6 @@ static bool IsJsonOrText(const TArray<uint8>& Data, int32 StartOffset = 0)
 void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 {
 	if (In.Num() < 4) return;
-	if (!IsValid(PngDecoder))
-	{
-		UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decoder not available"));
-		return;
-	}
 
 	// Handle optional 8-byte binary header [1,2] (BE or LE) used by WebViewer
 	int32 Offset = 0;
@@ -486,11 +396,13 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 						TArray<uint8> Bytes;
 						FBase64::Decode(Base64Str, Bytes);
 
-						if (!IsValid(PngDecoder)) continue;
-						UTexture2D* Tex = PngDecoder->DecodePNGToTexture(Bytes);
-						if (Tex)
+						if (PngDecoder)
 						{
-							OnTextureReceived.Broadcast(Tex);
+							UTexture2D* Tex = PngDecoder->DecodePNGToTexture(Bytes);
+							if (Tex)
+							{
+								OnTextureReceived.Broadcast(Tex);
+							}
 						}
 					}
 					return;
@@ -544,7 +456,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		// Protection: If too many messages without completing a frame, clear accumulator
 		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Comfy] Stale frame detected (%d messages), clearing accumulator"), MessagesSinceLastFrame);
 			AccumulatedPngMessages.Empty();
 			MessagesSinceLastFrame = 0;
 		}
@@ -553,7 +464,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		const int32 MaxAccumulatedPngs = ExpectedPngCount * 2;
 		if (AccumulatedPngMessages.Num() > MaxAccumulatedPngs)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Comfy] Accumulator overflow (%d PNGs), clearing"), AccumulatedPngMessages.Num());
 			AccumulatedPngMessages.Empty();
 			MessagesSinceLastFrame = 0;
 			return;
@@ -574,7 +484,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 						                    AccumulatedPngMessages[j].GetData(), 
 						                    AccumulatedPngMessages[i].Num()) == 0)
 						{
-							UE_LOG(LogTemp, Warning, TEXT("[Comfy] Duplicate PNGs detected (indices %d and %d), skipping frame"), i, j);
 							bFoundDuplicates = true;
 							break;
 						}
@@ -684,7 +593,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			
 			if (RGBAccumIdx != INDEX_NONE && DepthAccumIdx != INDEX_NONE && RGBAccumIdx == DepthAccumIdx)
 			{
-				UE_LOG(LogTemp, Error, TEXT("[Comfy] RGB and Depth assigned to same index, skipping frame"));
 				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 				MessagesSinceLastFrame = 0;
 				return;
@@ -695,24 +603,10 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			DecodedTextures.SetNum(ExpectedPngCount);
 			
 			// First pass: decode all PNGs
+			if (!PngDecoder) return;
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
-				if (!IsValid(PngDecoder))
-				{
-					UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decoder invalid during decode"));
-					AccumulatedPngMessages.Empty();
-					return;
-				}
-
 				UTexture2D* Tex = PngDecoder->DecodePNGToTexture(AccumulatedPngMessages[i]);
-				if (!Tex)
-				{
-					UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG decode failed for frame %d (size %d bytes)"), i, AccumulatedPngMessages[i].Num());
-					AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
-					MessagesSinceLastFrame = 0;
-					return;
-				}
-
 				DecodedTextures[i] = Tex;
 			}
 			
@@ -752,10 +646,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 			MessagesSinceLastFrame = 0;
 		}
-	}
-	else if (Pngs.Num() == 0)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[Comfy] PNG signature present but SplitPNGStream returned 0 PNGs"));
 	}
 }
 

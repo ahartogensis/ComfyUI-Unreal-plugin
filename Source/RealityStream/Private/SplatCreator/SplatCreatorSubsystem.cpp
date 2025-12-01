@@ -1,839 +1,827 @@
 #include "SplatCreator/SplatCreatorSubsystem.h"
-#include "ProceduralMeshComponent.h"
 #include "Engine/World.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "HAL/PlatformProcess.h"
 #include "GameFramework/Actor.h"
-#include "Misc/Parse.h"
-#include "Materials/MaterialInterface.h"
-#include "Materials/Material.h"
 #include "Engine/StaticMesh.h"
-#include "Components/StaticMeshComponent.h"
-#include "Components/SceneComponent.h"
-#include "Async/Async.h"
-#include "HAL/RunnableThread.h"
-#include "GameFramework/RotatingMovementComponent.h"
-
-//reconstruction to mesh importer from World Explorer to Unreal Engine 5.6 
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Engine.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
+#include "Engine/LocalPlayer.h"
+#include "Math/RotationMatrix.h"
 
 void USplatCreatorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
     UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem initialized"));
 
-    // Reset shutdown flag
-    bIsShuttingDown = false;
-    bHasStartedImportLoop = false;
+	// Note: StartPointCloudSystem() will be called automatically when world is ready
+	// Or call it manually from Blueprint using "Get Splat Creator Subsystem" -> "Start Point Cloud System"
+}
+
+void USplatCreatorSubsystem::StartPointCloudSystem()
+{
+	if (bIsInitialized)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Already initialized"));
+		return;
+	}
+	
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Cannot start - no world available"));
+		return;
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Starting point cloud system..."));
+	
+	ScanForPLYFiles();
+	
+	if (PlyFiles.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No PLY files found in %s"), *GetSplatCreatorFolder());
+		return;
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files"), PlyFiles.Num());
+	
+	// Load first PLY file
+	FString FirstPLYPath = GetSplatCreatorFolder() / PlyFiles[0];
+	LoadPLYFile(FirstPLYPath);
+	
+	// Start cycle timer (45 seconds)
+	World->GetTimerManager().SetTimer(
+		CycleTimer,
+		this,
+		&USplatCreatorSubsystem::CycleToNextPLY,
+		45.0f,
+		true
+	);
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every 45 seconds"));
+	
+	bIsInitialized = true;
 }
 
 void USplatCreatorSubsystem::Deinitialize()
 {
-	// Mark as shutting down to prevent async callbacks from accessing destroyed subsystem
-	bIsShuttingDown = true;
-
-	// Clear the timer
-	if (LoopTimer.IsValid() && GetWorld())
+	if (CycleTimer.IsValid() && GetWorld())
 	{
-		GetWorld()->GetTimerManager().ClearTimer(LoopTimer);
+		GetWorld()->GetTimerManager().ClearTimer(CycleTimer);
 	}
-
-	// Clean up current mesh actor
-	if (CurrentMeshActor)
+	if (MorphTimer.IsValid() && GetWorld())
 	{
-		CurrentMeshActor->Destroy();
-		CurrentMeshActor = nullptr;
+		GetWorld()->GetTimerManager().ClearTimer(MorphTimer);
 	}
-
-	bHasStartedImportLoop = false;
-
-	// Stop the Docker container when play stops (non-blocking, but set flag first)
-	StopDockerContainer();
-
+	if (CurrentPointCloudActor)
+	{
+		CurrentPointCloudActor->Destroy();
+	}
 	Super::Deinitialize();
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem deinitialized"));
 }
 
-// =====================================================
-//  DOCKER CONTAINER MANAGEMENT
-// =====================================================
-bool USplatCreatorSubsystem::IsDockerContainerRunning()
+FString USplatCreatorSubsystem::GetSplatCreatorFolder() const
 {
-    FString DockerExe = TEXT("C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe");
-    FString Arguments = TEXT("ps -q -f name=splat_stream");
-    
-    FString Out, Err;
-    int32 Code;
-    
-    bool bSuccess = FPlatformProcess::ExecProcess(*DockerExe, *Arguments, &Code, &Out, &Err);
-    
-    // If output is not empty, container exists and is running
-    FString TrimmedOutput = Out.TrimStartAndEnd();
-    return bSuccess && !TrimmedOutput.IsEmpty();
-}
-
-bool USplatCreatorSubsystem::EnsureDockerContainerRunning()
-{
-    // Check if container is already running
-    if (IsDockerContainerRunning())
-    {
-        UE_LOG(LogTemp, Display, TEXT("[Docker] Container splat_stream is already running"));
-        return true;
-    }
-    
-    FString DockerExe = TEXT("C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe");
-    
-    // First check if container exists (but is stopped)
-    FString CheckArgs = TEXT("ps -a -q -f name=splat_stream");
-    FString Out, Err;
-    int32 Code;
-    
-    FPlatformProcess::ExecProcess(*DockerExe, *CheckArgs, &Code, &Out, &Err);
-    FString TrimmedOutput = Out.TrimStartAndEnd();
-    
-    if (!TrimmedOutput.IsEmpty())
-    {
-        // Container exists but is stopped, start it
-        UE_LOG(LogTemp, Display, TEXT("[Docker] Container exists but is stopped, starting it..."));
-        FString StartArgs = TEXT("start splat_stream");
-        bool bSuccess = FPlatformProcess::ExecProcess(*DockerExe, *StartArgs, &Code, &Out, &Err);
-        
-        if (bSuccess && Code == 0)
-        {
-            UE_LOG(LogTemp, Display, TEXT("[Docker] Container started successfully"));
-            return true;
-        }
-        else
-        {
-            UE_LOG(LogTemp, Warning, TEXT("[Docker] Failed to start container. Code: %d, Error: %s"), Code, *Err);
-            return false;
-        }
-    }
-    else
-    {
-        // Container doesn't exist, create and start it
-        UE_LOG(LogTemp, Display, TEXT("[Docker] Container doesn't exist, creating it..."));
-        FString RunArgs = FString::Printf(
-            TEXT("run -d --name splat_stream -v \"%s:/workspace/data\" gaussian-splatting:optimized sleep infinity"),
-            *GetOutputDirectory()
-        );
-        
-        bool bSuccess = FPlatformProcess::ExecProcess(*DockerExe, *RunArgs, &Code, &Out, &Err);
-        
-        if (bSuccess && Code == 0)
-        {
-            UE_LOG(LogTemp, Display, TEXT("[Docker] Container created and started. ID: %s"), *Out.TrimStartAndEnd());
-            return true;
-        }
-        else
-        {
-            // If it's a name conflict error, the container might exist but in a weird state
-            // Try to start it instead of removing and recreating
-            if (Err.Contains(TEXT("already in use")) || Err.Contains(TEXT("Conflict")))
-            {
-                UE_LOG(LogTemp, Display, TEXT("[Docker] Container name conflict detected, attempting to start existing container..."));
-                FString StartArgs = TEXT("start splat_stream");
-                bool bStartSuccess = FPlatformProcess::ExecProcess(*DockerExe, *StartArgs, &Code, &Out, &Err);
-                
-                if (bStartSuccess && Code == 0)
-                {
-                    UE_LOG(LogTemp, Display, TEXT("[Docker] Existing container started successfully"));
-                    return true;
-                }
-                else
-                {
-                    // If starting failed, container might be corrupted, remove and recreate
-                    UE_LOG(LogTemp, Warning, TEXT("[Docker] Failed to start existing container, removing and recreating..."));
-                    FString RemoveArgs = TEXT("rm -f splat_stream");
-                    FPlatformProcess::ExecProcess(*DockerExe, *RemoveArgs, &Code, &Out, &Err);
-                    
-                    // Retry creating the container
-                    bSuccess = FPlatformProcess::ExecProcess(*DockerExe, *RunArgs, &Code, &Out, &Err);
-                    if (bSuccess && Code == 0)
-                    {
-                        UE_LOG(LogTemp, Display, TEXT("[Docker] Container recreated successfully. ID: %s"), *Out.TrimStartAndEnd());
-                        return true;
-                    }
-                }
-            }
-            
-            UE_LOG(LogTemp, Error, TEXT("[Docker] Failed to create container. Code: %d, Output: %s, Error: %s"), Code, *Out, *Err);
-            return false;
-        }
-    }
-}
-
-void USplatCreatorSubsystem::StartDockerContainer()
-{
-    // Run container check/start asynchronously to avoid blocking
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this]()
-    {
-        if (!bIsShuttingDown && IsValid(this))
-        {
-            EnsureDockerContainerRunning();
-        }
-    });
-}
-
-void USplatCreatorSubsystem::StopDockerContainer()
-{
-    // Stop container asynchronously to avoid blocking
-    AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this]()
-    {
-        // Check if we're shutting down - still try to stop container, but don't access subsystem members
-        if (!IsDockerContainerRunning())
-        {
-            if (!bIsShuttingDown)
-            {
-                UE_LOG(LogTemp, Display, TEXT("[Docker] Container is not running, nothing to stop"));
-            }
-            return;
-        }
-
-        FString DockerExe = TEXT("C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe");
-        FString StopArgs = TEXT("stop splat_stream");
-        
-        FString Out, Err;
-        int32 Code;
-        
-        if (!bIsShuttingDown)
-        {
-            UE_LOG(LogTemp, Display, TEXT("[Docker] Stopping container..."));
-        }
-        bool bSuccess = FPlatformProcess::ExecProcess(*DockerExe, *StopArgs, &Code, &Out, &Err);
-        
-        if (bSuccess && Code == 0)
-        {
-            UE_LOG(LogTemp, Display, TEXT("[Docker] Container stopped successfully"));
-        }
-        else
-        {
-            UE_LOG(LogTemp, Warning, TEXT("[Docker] Failed to stop container. Code: %d, Error: %s"), Code, *Err);
-        }
-    });
+	FString PluginDir = FPaths::ProjectPluginsDir() / TEXT("RealityStream");
+	FString SplatCreatorDir = PluginDir / TEXT("SplatCreatorOutputs");
+	return SplatCreatorDir;
 }
 
 void USplatCreatorSubsystem::ScanForPLYFiles()
 {
-    FString Dir = GetOutputDirectory();
-    TArray<FString> ObjFiles;
-    TArray<FString> TempPlyFiles;
-    
-    // Scan for both PLY and OBJ files
-    IFileManager::Get().FindFiles(TempPlyFiles, *(Dir + "/*.ply"), true, false);
-    IFileManager::Get().FindFiles(ObjFiles, *(Dir + "/*.obj"), true, false);
-    
-    // First add all PLY files
-    PlyFiles = TempPlyFiles;
-    
-    // Add OBJ files that don't have corresponding PLY files
-    for (const FString& ObjFile : ObjFiles)
-    {
-        // Check if corresponding PLY file exists in the directory
-        FString ObjPath = Dir / ObjFile;
-        FString PlyPath = ObjPath.Replace(TEXT(".obj"), TEXT(".ply"));
-        
-        if (!FPaths::FileExists(PlyPath))
-        {
-            // No corresponding PLY, so we can add this OBJ to the list
-            PlyFiles.AddUnique(ObjFile);
-        }
-    }
-    
-    PlyFiles.Sort();
-
-    UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d mesh files (PLY/OBJ)"), PlyFiles.Num());
+	FString SplatCreatorDir = GetSplatCreatorFolder();
+	PlyFiles.Empty();
+	
+	// Convert to absolute path and normalize
+	FString AbsolutePath = FPaths::ConvertRelativePathToFull(SplatCreatorDir);
+	FPaths::NormalizeDirectoryName(AbsolutePath);
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Scanning for PLY files in: %s"), *AbsolutePath);
+	
+	// Check if directory exists
+	if (!FPaths::DirectoryExists(AbsolutePath))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Directory does not exist: %s"), *AbsolutePath);
+		return;
+	}
+	
+	IFileManager::Get().FindFiles(PlyFiles, *(AbsolutePath / TEXT("*.ply")), true, false);
+	PlyFiles.Sort();
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files in %s"), PlyFiles.Num(), *AbsolutePath);
+	
+	// Log file names for debugging
+	for (const FString& File : PlyFiles)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator]   - %s"), *File);
+	}
 }
 
-void USplatCreatorSubsystem::StartAutoCycleTimer()
+void USplatCreatorSubsystem::CycleToNextPLY()
 {
-    if (LoopTimer.IsValid())
-    {
-        return;
-    }
+	if (PlyFiles.Num() == 0)
+	{
+		ScanForPLYFiles(); // Re-scan in case files were added
+		if (PlyFiles.Num() == 0) return;
+	}
+	
+	CurrentFileIndex = (CurrentFileIndex + 1) % PlyFiles.Num();
+	FString PLYPath = GetSplatCreatorFolder() / PlyFiles[CurrentFileIndex];
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycling to PLY: %s"), *PlyFiles[CurrentFileIndex]);
+	LoadPLYFile(PLYPath);
+}
 
-    UWorld* World = GetWorld();
-    if (!World || !World->IsGameWorld())
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start cycle timer - invalid world context"));
-        return;
-    }
+void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
+{
+	TArray<FVector> Positions;
+	TArray<FColor> Colors;
+	
+	if (!ParsePLYFile(PLYPath, Positions, Colors))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to parse PLY file: %s"), *PLYPath);
+            return;
+        }
 
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed %d points from %s"), Positions.Num(), *PLYPath);
+	
+	// Log coordinate ranges for debugging
+	if (Positions.Num() > 0)
+	{
+		FVector MinBounds = Positions[0];
+		FVector MaxBounds = Positions[0];
+		for (const FVector& Pos : Positions)
+		{
+			MinBounds = MinBounds.ComponentMin(Pos);
+			MaxBounds = MaxBounds.ComponentMax(Pos);
+		}
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Coordinate range: Min(%s) Max(%s)"), 
+			*MinBounds.ToString(), *MaxBounds.ToString());
+	}
+	
+	// Filter by occlusion culling based on player camera position
+	TArray<FVector> FilteredPositions;
+	TArray<FColor> FilteredColors;
+	FilterByOcclusion(Positions, Colors, FilteredPositions, FilteredColors);
+	
+	if (FilteredPositions.Num() > 0)
+	{
+		Positions = FilteredPositions;
+		Colors = FilteredColors;
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] After occlusion culling: %d points"), Positions.Num());
+        }
+        else
+        {
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Occlusion culling removed all points, using original"));
+	}
+	
+	// Limit to 500k points
+	if (Positions.Num() > 500000)
+	{
+		Positions.SetNum(500000);
+		Colors.SetNum(500000);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Limited to 500k points"));
+	}
+	
+	// Create or morph point cloud
+	if (PointCloudComponent && bIsMorphing == false)
+	{
+		// Start smooth morphing between point clouds
+		OldPositions.Empty();
+		OldColors.Empty();
+		
+		// Get current positions
+		int32 InstanceCount = PointCloudComponent->GetInstanceCount();
+		for (int32 i = 0; i < InstanceCount; i++)
+		{
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				OldPositions.Add(Transform.GetLocation());
+				OldColors.Add(FColor::White); // Use white as default, colors will interpolate
+			}
+		}
+		
+		// Scale positions for display (PLY coordinates are typically small)
+		NewPositions.Empty();
+		NewPositions.Reserve(Positions.Num());
+		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f); // Move down by 100 units (moved up from -200)
+		for (const FVector& Pos : Positions)
+		{
+			NewPositions.Add(Pos * 125.0f + DownOffset); // Scale by 125x and apply offset
+		}
+		NewColors = Colors;
+		
+		// Calculate adaptive sphere sizes for new positions (already scaled)
+		CalculateAdaptiveSphereSizes(NewPositions, SphereSizes);
+		
+		MorphProgress = 0.0f;
+		MorphUpdateIndex = 0;
+		bIsMorphing = true;
+		
+		if (UWorld* World = GetWorld())
+		{
+			MorphStartTime = World->GetTimeSeconds();
     World->GetTimerManager().SetTimer(
-        LoopTimer,
+				MorphTimer,
         this,
-        &USplatCreatorSubsystem::CycleMeshes,
-        45.0f,
+				&USplatCreatorSubsystem::UpdateMorph,
+				0.033f, // ~30fps update rate for better performance
         true
     );
-
-    UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Auto cycle timer started"));
-}
-
-void USplatCreatorSubsystem::CycleMeshes()
-{
-    if (PlyFiles.Num() == 0) return;
-
-    FString MeshFile = GetOutputDirectory() / PlyFiles[CurrentFileIndex];
-    FString ObjFile;
-    bool bFileHandled = false; // Track if we successfully handled this file
-
-    // Check if file is already OBJ
-    if (MeshFile.EndsWith(TEXT(".obj")))
-    {
-        ObjFile = MeshFile;
-        UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Using existing OBJ file: %s"), *ObjFile);
-        
-        // Spawn mesh immediately
-        if (FPaths::FileExists(ObjFile))
-        {
-            // Delete previous mesh only when we're about to spawn a new one
-            if (CurrentMeshActor)
-            {
-                CurrentMeshActor->Destroy();
-                CurrentMeshActor = nullptr;
-            }
-            
-            CurrentMeshActor = ImportAndSpawnOBJMesh(
-                ObjFile,
-                FVector(100,0,0),
-                FRotator(180,0,0),
-                FVector(500)
-            );
-            bFileHandled = true;
         }
     }
     else
     {
-        // It's a PLY file, check if OBJ already exists
-        ObjFile = MeshFile.Replace(TEXT(".ply"), TEXT("_mesh.obj"));
-        
-        if (FPaths::FileExists(ObjFile))
-        {
-            UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found existing OBJ, skipping conversion: %s"), *ObjFile);
-            
-            // Delete previous mesh only when we're about to spawn a new one
-            if (CurrentMeshActor)
-            {
-                CurrentMeshActor->Destroy();
-                CurrentMeshActor = nullptr;
-            }
-            
-            // Spawn mesh immediately
-            CurrentMeshActor = ImportAndSpawnOBJMesh(
-                ObjFile,
-                FVector(100,0,0),
-                FRotator(180,0,0),
-                FVector(500)
-            );
-            bFileHandled = true;
-        }
-        else
-        {
-            // OBJ doesn't exist - check if we're already converting this file
-            if (CurrentlyConvertingFile == MeshFile)
-            {
-                UE_LOG(LogTemp, Display, TEXT("[SplatCreator] File is already being converted, waiting: %s"), *MeshFile);
-                // Don't delete mesh or increment index - just wait for conversion to complete
-                bFileHandled = false;
-                return; // Exit early, keep current mesh visible
-            }
-            else
-            {
-                // Mark this file as being converted
-                CurrentlyConvertingFile = MeshFile;
-                
-                // Convert PLY → OBJ asynchronously
-                UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Converting PLY to OBJ (async): %s"), *MeshFile);
-                
-                FString MeshFileCopy = MeshFile;
-                FString ObjFileCopy = ObjFile;
-                
-                // Run conversion on background thread
-                // Capture the filename and index to spawn and increment when done
-                FString ExpectedFileName = PlyFiles[CurrentFileIndex];
-                int32 FileIndexForThisConversion = CurrentFileIndex;
-                
-                AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, MeshFileCopy, ObjFileCopy, ExpectedFileName, FileIndexForThisConversion]()
-                {
-                    // Check if shutting down before starting conversion
-                    if (bIsShuttingDown)
-                    {
-                        UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Shutting down, cancelling conversion"));
-                        return;
-                    }
-                    
-                    bool bSuccess = ConvertPLYToOBJ_Internal(MeshFileCopy, ObjFileCopy);
-                    
-                    // When conversion completes, spawn the mesh on game thread
-                    if (bSuccess && FPaths::FileExists(ObjFileCopy) && !bIsShuttingDown)
-                    {
-                        AsyncTask(ENamedThreads::GameThread, [this, ObjFileCopy, ExpectedFileName, FileIndexForThisConversion]()
-                        {
-                            // Check if subsystem is still valid and not shutting down
-                            if (bIsShuttingDown || !IsValid(this))
-                            {
-                                UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem shutting down, skipping mesh spawn"));
-                                return;
-                            }
-                            
-                            // Spawn the mesh - even if timer has moved on, spawn it
-                            // Delete any existing mesh before spawning new one
-                            if (CurrentMeshActor)
-                            {
-                                CurrentMeshActor->Destroy();
-                                CurrentMeshActor = nullptr;
-                            }
-                            
-                            CurrentMeshActor = ImportAndSpawnOBJMesh(
-                                ObjFileCopy,
-                                FVector(100,0,0),
-                                FRotator(180,0,0),
-                                FVector(500)
-                            );
-                            
-                            if (CurrentMeshActor)
-                            {
-                                UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Async conversion completed and mesh spawned"));
-                                
-                                // Clear the converting flag and increment to next file since we've handled this one
-                                CurrentlyConvertingFile.Empty();
-                                
-                                // Check if we're still on the same file to avoid race conditions
-                                if (PlyFiles.IsValidIndex(CurrentFileIndex) && PlyFiles[CurrentFileIndex] == ExpectedFileName)
-                                {
-                                    CurrentFileIndex = (CurrentFileIndex + 1) % PlyFiles.Num();
-                                    UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Moved to next file: %d/%d"), CurrentFileIndex + 1, PlyFiles.Num());
-                                }
-                            }
-                        });
-                    }
-                    else if (!bIsShuttingDown)
-                    {
-                        // Conversion failed, clear the flag
-                        AsyncTask(ENamedThreads::GameThread, [this, ExpectedFileName]()
-                        {
-                            if (!bIsShuttingDown && IsValid(this) && CurrentlyConvertingFile == ExpectedFileName)
-                            {
-                                CurrentlyConvertingFile.Empty();
-                            }
-                        });
-                    }
-                });
-                
-                // Don't increment index yet - wait for async completion
-                bFileHandled = false;
-            }
-        }
-    }
-
-    // Only increment to next file if we handled it immediately (not async)
-    if (bFileHandled)
-    {
-        CurrentFileIndex = (CurrentFileIndex + 1) % PlyFiles.Num();
-        UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Moved to next file: %d/%d"), CurrentFileIndex + 1, PlyFiles.Num());
-    }
-}
-
-
-// =====================================================
-//  MAIN ENTRY
-// =====================================================
-
-void USplatCreatorSubsystem::CheckAndImportSplat(const FString& VideoPath)
-{
-	const FString OutputDir = GetOutputDirectory();
-
-	if (!bHasStartedImportLoop)
-	{
-		StartDockerContainer();
-		StartAutoCycleTimer();
-		bHasStartedImportLoop = true;
-	}
- 
-	// Scan for any PLY or OBJ files
-	TArray<FString> FoundPlyFiles;
-	TArray<FString> FoundObjFiles;
-	IFileManager::Get().FindFiles(FoundPlyFiles, *(OutputDir + "/*.ply"), true, false);
-	IFileManager::Get().FindFiles(FoundObjFiles, *(OutputDir + "/*.obj"), true, false);
-	
-	// Rescan and update the file list
-	ScanForPLYFiles();
-	
-	// If we found OBJ files, use cycle meshes to place them
-	if (FoundObjFiles.Num() > 0 || PlyFiles.Num() > 0)
-	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d OBJ files and %d PLY files"), FoundObjFiles.Num(), FoundPlyFiles.Num());
-		
-		// Reset to start from the beginning
-		CurrentFileIndex = 0;
-		
-		// Trigger cycle meshes to place the first mesh
-		CycleMeshes();
-		
-		return;
-	}
-
-	// If no files found, process video if provided
-	if (!VideoPath.IsEmpty() && FPaths::FileExists(VideoPath))
-	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] No existing mesh files found, processing video..."));
-		ProcessVideoToMesh(VideoPath);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No PLY, OBJ, or valid video file found."));
+		// Create new point cloud
+		CreatePointCloud(Positions, Colors);
 	}
 }
 
-// =====================================================
-//  FILE PATH HELPERS
-// =====================================================
-
-FString USplatCreatorSubsystem::GetProjectDirectory() const
+bool USplatCreatorSubsystem::ParsePLYFile(const FString& PLYPath, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
 {
-	return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-}
-
-FString USplatCreatorSubsystem::GetOutputDirectory() const
-{
-	return GetProjectDirectory() / TEXT("Plugins/RealityStream/SplatCreatorOutputs");
-}
-
-FString USplatCreatorSubsystem::GetDataDirectory() const
-{
-	return GetProjectDirectory() / TEXT("Plugins/RealityStream/SplatCreatorData");
-}
-
-// =====================================================
-//  PLY → OBJ CONVERSION
-// =====================================================
-
-bool USplatCreatorSubsystem::ConvertPLYToOBJ(const FString& PLYPath, const FString& OBJPath)
-{
-	// This function is now called synchronously for compatibility, but the actual work is done async
-	// For immediate calls, we'll still do it synchronously but with minimal blocking
-	
-	FString PlyPathCopy = PLYPath;
-	FString ObjPathCopy = OBJPath;
-	
-	// Run the conversion asynchronously
-	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [this, PlyPathCopy, ObjPathCopy]()
+	TArray<uint8> FileData;
+	if (!FFileHelper::LoadFileToArray(FileData, *PLYPath))
 	{
-		ConvertPLYToOBJ_Internal(PlyPathCopy, ObjPathCopy);
-	});
-	
-	// For now, return true to indicate we've started the conversion
-	// The actual result will be handled when spawning the mesh
-	return true;
-}
-
-bool USplatCreatorSubsystem::ConvertPLYToOBJ_Internal(const FString& PLYPath, const FString& OBJPath)
-{
-	// Ensure container is running before executing commands
-	if (!EnsureDockerContainerRunning())
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to ensure Docker container is running"));
 		return false;
 	}
 	
-	FString OutputDir = GetOutputDirectory();
+	FString FileContent;
+	FFileHelper::BufferToString(FileContent, FileData.GetData(), FileData.Num());
 	
-	// Convert Windows paths to container paths (mounted at /workspace/data)
-	FString PlyFileName = FPaths::GetCleanFilename(PLYPath);
-	FString ObjFileName = FPaths::GetCleanFilename(OBJPath);
+	TArray<FString> Lines;
+	FileContent.ParseIntoArrayLines(Lines);
 	
-	FString ContainerPlyPath = FString::Printf(TEXT("/workspace/data/%s"), *PlyFileName);
-	FString ContainerObjPath = FString::Printf(TEXT("/workspace/data/%s"), *ObjFileName);
+	OutPositions.Empty();
+	OutColors.Empty();
 	
-	// Docker executable path
-	FString DockerExe = TEXT("C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe");
+	bool bIsBinary = false;
+	int32 VertexCount = 0;
+	int32 HeaderEndOffset = 0;
+	TArray<FString> PropertyNames;
 	
-	// Build the arguments for docker exec - use container paths
-	// Note: The Dockerfile copies the script to /workspace/scripts/Plugins/RealityStream/
-	FString Arguments = FString::Printf(
-		TEXT("exec splat_stream python3 /workspace/scripts/Plugins/RealityStream/convert_gaussian_ply.py \"%s\" \"%s\""),
-		*ContainerPlyPath, *ContainerObjPath
-	);
-	
-	int32 ReturnCode = 0;
-	FString Output;
-	FString Errors;
-	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Executing: %s %s"), *DockerExe, *Arguments);
-	
-	bool bSuccess = FPlatformProcess::ExecProcess(*DockerExe, *Arguments, &ReturnCode, &Output, &Errors);
-	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Docker execution result: %d"), ReturnCode);
-	if (!Output.IsEmpty())
+	// Parse header
+	for (int32 i = 0; i < Lines.Num(); i++)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Docker output: %s"), *Output);
+		FString Line = Lines[i].TrimStartAndEnd();
+		
+		if (Line.StartsWith(TEXT("format")))
+		{
+			bIsBinary = Line.Contains(TEXT("binary"));
+		}
+		else if (Line.StartsWith(TEXT("element vertex")))
+		{
+			TArray<FString> Parts;
+			Line.ParseIntoArray(Parts, TEXT(" "));
+			if (Parts.Num() >= 3)
+			{
+				VertexCount = FCString::Atoi(*Parts[2]);
+			}
+		}
+		else if (Line.StartsWith(TEXT("property")))
+		{
+			TArray<FString> Parts;
+			Line.ParseIntoArray(Parts, TEXT(" "));
+			if (Parts.Num() >= 3)
+			{
+				PropertyNames.Add(Parts[2]);
+			}
+		}
+		else if (Line == TEXT("end_header"))
+		{
+			int32 HeaderEndStrPos = FileContent.Find(TEXT("end_header"));
+			if (HeaderEndStrPos != INDEX_NONE)
+			{
+				int32 NewlinePos = FileContent.Find(TEXT("\n"), ESearchCase::CaseSensitive, ESearchDir::FromStart, HeaderEndStrPos);
+				HeaderEndOffset = NewlinePos != INDEX_NONE ? NewlinePos + 1 : HeaderEndStrPos + 10;
+			}
+			break;
+		}
 	}
-	if (!Errors.IsEmpty())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Docker errors: %s"), *Errors);
-	}
 	
-	// Wait a bit for file system to update
-	FPlatformProcess::Sleep(0.5f);
-	
-	if (bSuccess && ReturnCode == 0 && FPaths::FileExists(OBJPath))
+	if (bIsBinary)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Successfully converted PLY to OBJ: %s"), *OBJPath);
-		return true;
-	}
-
-	if (!FPaths::FileExists(OBJPath))
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] OBJ file not found after conversion: %s"), *OBJPath);
+		// Binary PLY parsing
+		const uint8* DataPtr = FileData.GetData() + HeaderEndOffset;
+		int32 DataOffset = 0;
+		
+		int32 XIdx = PropertyNames.IndexOfByKey(TEXT("x"));
+		int32 YIdx = PropertyNames.IndexOfByKey(TEXT("y"));
+		int32 ZIdx = PropertyNames.IndexOfByKey(TEXT("z"));
+		int32 RedIdx = PropertyNames.IndexOfByKey(TEXT("red"));
+		int32 GreenIdx = PropertyNames.IndexOfByKey(TEXT("green"));
+		int32 BlueIdx = PropertyNames.IndexOfByKey(TEXT("blue"));
+		// Gaussian splat spherical harmonics
+		int32 Fdc0Idx = PropertyNames.IndexOfByKey(TEXT("f_dc_0"));
+		int32 Fdc1Idx = PropertyNames.IndexOfByKey(TEXT("f_dc_1"));
+		int32 Fdc2Idx = PropertyNames.IndexOfByKey(TEXT("f_dc_2"));
+		
+		// Calculate vertex size (simplified - assume all floats)
+		int32 VertexSize = PropertyNames.Num() * 4;
+		
+		for (int32 i = 0; i < VertexCount && DataOffset + VertexSize <= FileData.Num() - HeaderEndOffset; i++)
+		{
+			float X = 0, Y = 0, Z = 0;
+			uint8 R = 255, G = 255, B = 255;
+			
+			if (XIdx >= 0) X = *reinterpret_cast<const float*>(DataPtr + DataOffset + XIdx * 4);
+			if (YIdx >= 0) Y = *reinterpret_cast<const float*>(DataPtr + DataOffset + YIdx * 4);
+			if (ZIdx >= 0) Z = *reinterpret_cast<const float*>(DataPtr + DataOffset + ZIdx * 4);
+			
+			// Check for Gaussian splat spherical harmonics first, then fall back to RGB
+			if (Fdc0Idx >= 0 && Fdc1Idx >= 0 && Fdc2Idx >= 0)
+			{
+				// Convert spherical harmonics to RGB
+				float SH0 = *reinterpret_cast<const float*>(DataPtr + DataOffset + Fdc0Idx * 4);
+				float SH1 = *reinterpret_cast<const float*>(DataPtr + DataOffset + Fdc1Idx * 4);
+				float SH2 = *reinterpret_cast<const float*>(DataPtr + DataOffset + Fdc2Idx * 4);
+				
+				// Spherical harmonics to RGB conversion (simplified - using DC component)
+				// SH coefficients are typically in range, convert to [0, 1] then to [0, 255]
+				// Apply sigmoid activation: 0.5 + 0.28209479177387814 * SH (standard SH normalization)
+				float Rf = FMath::Clamp(0.5f + 0.28209479177387814f * SH0, 0.0f, 1.0f);
+				float Gf = FMath::Clamp(0.5f + 0.28209479177387814f * SH1, 0.0f, 1.0f);
+				float Bf = FMath::Clamp(0.5f + 0.28209479177387814f * SH2, 0.0f, 1.0f);
+				
+				R = FMath::RoundToInt(Rf * 255.0f);
+				G = FMath::RoundToInt(Gf * 255.0f);
+				B = FMath::RoundToInt(Bf * 255.0f);
+			}
+			else if (RedIdx >= 0 && GreenIdx >= 0 && BlueIdx >= 0)
+			{
+				// Standard RGB values - read as float (common in PLY)
+				float Rf = *reinterpret_cast<const float*>(DataPtr + DataOffset + RedIdx * 4);
+				float Gf = *reinterpret_cast<const float*>(DataPtr + DataOffset + GreenIdx * 4);
+				float Bf = *reinterpret_cast<const float*>(DataPtr + DataOffset + BlueIdx * 4);
+				
+				// If values are > 1, they're likely already in 0-255 range, otherwise 0-1 range
+				if (Rf > 1.0f || Gf > 1.0f || Bf > 1.0f)
+				{
+					R = FMath::Clamp(FMath::RoundToInt(Rf), 0, 255);
+					G = FMath::Clamp(FMath::RoundToInt(Gf), 0, 255);
+					B = FMath::Clamp(FMath::RoundToInt(Bf), 0, 255);
+				}
+				else
+				{
+					R = FMath::Clamp(FMath::RoundToInt(Rf * 255.0f), 0, 255);
+					G = FMath::Clamp(FMath::RoundToInt(Gf * 255.0f), 0, 255);
+					B = FMath::Clamp(FMath::RoundToInt(Bf * 255.0f), 0, 255);
+				}
+			}
+			
+			// Convert coordinates: PLY (X, Y, Z) -> Unreal (X, Z, -Y)
+			OutPositions.Add(FVector(X, Z, -Y));
+			OutColors.Add(FColor(R, G, B, 255));
+			
+			DataOffset += VertexSize;
+		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Docker command failed with return code: %d"), ReturnCode);
+		// ASCII PLY parsing
+		int32 LineIndex = 0;
+		for (int32 i = 0; i < Lines.Num(); i++)
+		{
+			if (Lines[i].TrimStartAndEnd() == TEXT("end_header"))
+			{
+				LineIndex = i + 1;
+				break;
+			}
+		}
+		
+		for (int32 i = 0; i < VertexCount && LineIndex < Lines.Num(); i++, LineIndex++)
+		{
+			FString Line = Lines[LineIndex].TrimStartAndEnd();
+			TArray<FString> Parts;
+			Line.ParseIntoArray(Parts, TEXT(" "));
+			
+			if (Parts.Num() >= 3)
+			{
+				float X = FCString::Atof(*Parts[0]);
+				float Y = FCString::Atof(*Parts[1]);
+				float Z = FCString::Atof(*Parts[2]);
+				
+				uint8 R = 255, G = 255, B = 255;
+				if (Parts.Num() >= 6)
+				{
+					R = FCString::Atoi(*Parts[3]);
+					G = FCString::Atoi(*Parts[4]);
+					B = FCString::Atoi(*Parts[5]);
+				}
+				
+				// Convert coordinates: PLY (X, Y, Z) -> Unreal (X, Z, -Y)
+				OutPositions.Add(FVector(X, Z, -Y));
+				OutColors.Add(FColor(R, G, B, 255));
+			}
+		}
 	}
-	return false;
+	
+	return OutPositions.Num() > 0;
 }
 
-void USplatCreatorSubsystem::ProcessVideoToMesh(const FString& VideoPath)
+void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
 {
-	UE_LOG(LogTemp, Warning, TEXT("ProcessVideoToMesh() not implemented yet. Video: %s"), *VideoPath);
+	OutPositions.Empty();
+	OutColors.Empty();
+	
+	if (InPositions.Num() == 0) return;
+	
+	// No culling - keep all points, but limit total count for performance
+	// Use uniform sampling to reduce from 2M to manageable number while maintaining mesh-like appearance
+	// Reduced significantly to avoid HISM internal culling issues
+	const int32 MaxPoints = 170000;
+	
+	if (InPositions.Num() <= MaxPoints)
+	{
+		// Keep all points if under limit
+		OutPositions = InPositions;
+		OutColors = InColors;
+		UE_LOG(LogTemp, Display, TEXT("[NoCull] Keeping all %d points (under limit)"), InPositions.Num());
+		return;
+	}
+	
+	// Uniform sampling: keep every Nth point to reach target count
+	// This maintains the overall shape while reducing point count
+	float SampleRate = (float)InPositions.Num() / (float)MaxPoints;
+	int32 Step = FMath::Max(1, FMath::RoundToInt(SampleRate));
+	
+	OutPositions.Reserve(MaxPoints);
+	OutColors.Reserve(MaxPoints);
+	
+	for (int32 i = 0; i < InPositions.Num(); i += Step)
+	{
+		if (OutPositions.Num() >= MaxPoints)
+		{
+			break;
+		}
+		
+		OutPositions.Add(InPositions[i]);
+		if (i < InColors.Num())
+		{
+			OutColors.Add(InColors[i]);
+	}
+	else
+	{
+				OutColors.Add(FColor::White);
+			}
+		}
+		
+	UE_LOG(LogTemp, Display, TEXT("[NoCull] Uniform sampling: %d -> %d points (step: %d)"), 
+		InPositions.Num(), OutPositions.Num(), Step);
 }
 
-AActor* USplatCreatorSubsystem::ImportAndSpawnOBJMesh(
-	const FString& ObjPath, 
-	FVector Location, 
-	FRotator Rotation, 
-	FVector Scale)
+void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>& Positions, TArray<float>& OutSphereSizes)
 {
-	// Ensure we're on the game thread
-	if (!IsInGameThread())
+	const int32 NumPoints = Positions.Num();
+	OutSphereSizes.Empty(NumPoints);
+	OutSphereSizes.Reserve(NumPoints);
+	
+	// Min and max cube sizes (in scale units)
+	const float MinCubeSize = 0.01f;   // Small cube for high density areas
+	const float MaxCubeSize = 0.1f;   // Large cube for sparse areas
+	const float BaseCubeSize = 0.05f;  // Default size for dense clusters
+	
+	// Search radius for finding nearest neighbors (in scaled world units)
+	// Increased to account for scaled positions (125x scaling)
+	const float SearchRadius = 1.0f;
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculating adaptive sphere sizes for %d points (SearchRadius=%.1f)..."), NumPoints, SearchRadius);
+	
+	// For each point, find nearest neighbor and calculate adaptive size
+	for (int32 i = 0; i < NumPoints; i++)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] ImportAndSpawnOBJMesh called from non-game thread!"));
-		return nullptr;
+		const FVector& CurrentPos = Positions[i];
+		float NearestDistance = MAX_flt;
+		
+		// Find nearest neighbor within search radius
+		// Use spatial search: check nearby points (within reasonable range)
+		const int32 SearchRange = FMath::Min(1000, NumPoints); // Check up to 1000 nearby points for performance
+		const int32 StartIdx = FMath::Max(0, i - SearchRange / 2);
+		const int32 EndIdx = FMath::Min(NumPoints, i + SearchRange / 2);
+		
+		for (int32 j = StartIdx; j < EndIdx; j++)
+		{
+			if (i == j) continue;
+			
+			const float Distance = FVector::Dist(CurrentPos, Positions[j]);
+			if (Distance < NearestDistance)
+			{
+				NearestDistance = Distance;
+			}
+		}
+		
+		// Calculate adaptive size based on nearest neighbor distance
+		// High density (close neighbors) = smaller spheres (0.1)
+		// Sparse areas (far neighbors) = larger spheres (0.3)
+		// Small NearestDistance (high density) -> small sphere (0.1)
+		// Large NearestDistance (sparse) -> large sphere (0.3)
+		float SphereSize;
+		
+		// If no neighbor found or very far, use large sphere for sparse areas
+		if (NearestDistance == MAX_flt)
+		{
+			SphereSize = MaxCubeSize; // Large sphere for isolated points
+		}
+		else
+		{
+			// Map distance: small distance (high density) -> small sphere, large distance (sparse) -> large sphere
+			// Use a threshold: distances < 50 units = dense (0.1), distances > 200 units = sparse (0.3)
+			// Linear interpolation between thresholds
+			const float DenseThreshold = 50.0f;  // Below this = dense (0.1)
+			const float SparseThreshold = 200.0f; // Above this = sparse (0.3)
+			
+			if (NearestDistance <= DenseThreshold)
+			{
+				SphereSize = MinCubeSize; // Dense area = small sphere
+			}
+			else if (NearestDistance >= SparseThreshold)
+			{
+				SphereSize = MaxCubeSize; // Sparse area = large sphere
+			}
+			else
+			{
+				// Interpolate between dense and sparse thresholds
+				float T = (NearestDistance - DenseThreshold) / (SparseThreshold - DenseThreshold);
+				SphereSize = FMath::Lerp(MinCubeSize, MaxCubeSize, T);
+			}
+		}
+		
+		OutSphereSizes.Add(FMath::Clamp(SphereSize, MinCubeSize, MaxCubeSize));
 	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated adaptive sphere sizes: min=%.3f, max=%.3f"), 
+		MinCubeSize, MaxCubeSize);
+}
 
-	// Prevent concurrent actor spawning to avoid crashes with ComfyUI
-	if (bIsSpawningActor)
+void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, const TArray<FColor>& Colors)
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+	
+	// Destroy old actor
+	if (CurrentPointCloudActor)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Actor spawn already in progress, skipping"));
-		return nullptr;
+		CurrentPointCloudActor->Destroy();
 	}
+	
+	// Create new actor
+	CurrentPointCloudActor = World->SpawnActor<AActor>();
+	if (!CurrentPointCloudActor) return;
+	
+	// Load sphere mesh
+	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	if (!SphereMesh) return;
+	
+	// Create HISM component
+	PointCloudComponent = NewObject<UHierarchicalInstancedStaticMeshComponent>(CurrentPointCloudActor);
+	PointCloudComponent->SetStaticMesh(SphereMesh);
+	PointCloudComponent->SetNumCustomDataFloats(4);
+	PointCloudComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	PointCloudComponent->SetCastShadow(false);
+	PointCloudComponent->SetVisibility(true);
+	PointCloudComponent->SetHiddenInGame(false);
+	
+	// Disable all culling to prevent points from disappearing
+	PointCloudComponent->SetCullDistances(0, 0); // No near cull, no far cull
+	PointCloudComponent->SetCanEverAffectNavigation(false);
+	PointCloudComponent->SetReceivesDecals(false);
+	
+	// Force the component to always render
+	PointCloudComponent->SetVisibility(true);
+	PointCloudComponent->SetHiddenInGame(false);
+	
+	// HISM-specific settings to reduce aggressive culling
+	// These help prevent instances from being culled when looking straight on
+	PointCloudComponent->bDisableCollision = true;
+	PointCloudComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	
+	// Try to reduce HISM's internal culling aggressiveness
+	// Note: HISM uses an octree structure internally, and reducing instance count helps
+	
+	// Set material to see colors
+	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
+	if (!Material)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Material M_VertexColor not found at /Game/_GENERATED/Materials/, trying fallback"));
+		Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	}
+	if (Material)
+	{
+		PointCloudComponent->SetMaterial(0, Material);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set material: %s"), *Material->GetName());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to load material"));
+	}
+	
+	PointCloudComponent->RegisterComponent();
+	CurrentPointCloudActor->SetRootComponent(PointCloudComponent);
+	
+	// Position actor at origin
+	CurrentPointCloudActor->SetActorLocation(FVector::ZeroVector);
+	
+	// Calculate adaptive sphere sizes based on point density
+	// Scale positions first (same scaling as used for rendering: 125.0f)
+	TArray<FVector> ScaledPositions;
+	ScaledPositions.Reserve(Positions.Num());
+	for (const FVector& Pos : Positions)
+	{
+		ScaledPositions.Add(Pos * 125.0f);
+	}
+	CalculateAdaptiveSphereSizes(ScaledPositions, SphereSizes);
+	
+	// Add instances in batches
+	int32 NumInstances = FMath::Min(Positions.Num(), Colors.Num());
+	const int32 BatchSize = 5000;
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Adding %d instances in batches of %d..."), NumInstances, BatchSize);
+	
+	for (int32 BatchStart = 0; BatchStart < NumInstances; BatchStart += BatchSize)
+	{
+		int32 BatchEnd = FMath::Min(BatchStart + BatchSize, NumInstances);
+		TArray<FTransform> Transforms;
+		Transforms.Reserve(BatchEnd - BatchStart);
+		
+		// Offset to move PLY down (negative Z in Unreal = down)
+		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f); //
+		for (int32 i = BatchStart; i < BatchEnd; i++)
+		{
+			FTransform Transform;
+			// Scale positions and apply downward offset
+			Transform.SetLocation(Positions[i] * 125.0f + DownOffset);
+			// Use adaptive sphere size, fallback to default if not calculated
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.1f;
+			Transform.SetScale3D(FVector(SphereSize));
+			Transforms.Add(Transform);
+		}
+		
+		PointCloudComponent->AddInstances(Transforms, false, false);
+		
+		if (BatchEnd % 50000 == 0 || BatchEnd >= NumInstances)
+		{
+			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Added %d / %d instances..."), BatchEnd, NumInstances);
+		}
+	}
+	
+	// Set colors
+	for (int32 i = 0; i < NumInstances && i < Colors.Num(); i++)
+	{
+		PointCloudComponent->SetCustomDataValue(i, 0, Colors[i].R / 255.0f);
+		PointCloudComponent->SetCustomDataValue(i, 1, Colors[i].G / 255.0f);
+		PointCloudComponent->SetCustomDataValue(i, 2, Colors[i].B / 255.0f);
+		PointCloudComponent->SetCustomDataValue(i, 3, Colors[i].A / 255.0f);
+	}
+	
+	PointCloudComponent->MarkRenderStateDirty();
+	
+	// Store sphere sizes for morphing (already calculated above)
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created point cloud with %d spheres"), NumInstances);
+}
 
-	if (!FPaths::FileExists(ObjPath))
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] OBJ file not found: %s"), *ObjPath);
-		return nullptr;
-	}
+void USplatCreatorSubsystem::UpdateMorph()
+{
+	if (!bIsMorphing || !PointCloudComponent) return;
 
 	UWorld* World = GetWorld();
-	if (!World || !World->IsGameWorld())
+	if (!World) return;
+	
+	float CurrentTime = World->GetTimeSeconds();
+	float ElapsedTime = CurrentTime - MorphStartTime;
+	MorphProgress = ElapsedTime / MorphDuration;
+	
+	if (MorphProgress >= 1.0f)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Invalid world context"));
-		return nullptr;
-	}
-
-	// Set spawn lock
-	bIsSpawningActor = true;
-
-	AActor* MeshActor = World->SpawnActor<AActor>();
-	if (!MeshActor)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to spawn actor"));
-		bIsSpawningActor = false;
-		return nullptr;
-	}
-
-	UProceduralMeshComponent* MeshComp = CreateProceduralMeshFromOBJ(ObjPath, MeshActor);
-	if (!MeshComp)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to create procedural mesh component"));
-		MeshActor->Destroy();
-		bIsSpawningActor = false;
-		return nullptr;
+		CompleteMorph();
+		return;
 	}
 	
-	// MeshComp is valid, proceed with setup
-	MeshComp->SetMobility(EComponentMobility::Movable);
-	MeshActor->SetRootComponent(MeshComp);
+	// Smooth easing function (ease-in-out cubic for smoother animation)
+	float EasedProgress = MorphProgress < 0.5f
+		? 4.0f * MorphProgress * MorphProgress * MorphProgress
+		: 1.0f - FMath::Pow(-2.0f * MorphProgress + 2.0f, 3.0f) / 2.0f;
 	
-	// Add spinning motion - must be after root component is set
-	URotatingMovementComponent* Rotator = NewObject<URotatingMovementComponent>(MeshActor);
-	if (Rotator)
+	// Update instances in batches
+	int32 MaxInstances = FMath::Max(OldPositions.Num(), NewPositions.Num());
+	int32 BatchSize = 5000; // Larger batch for better performance
+	int32 BatchEnd = FMath::Min(MorphUpdateIndex + BatchSize, MaxInstances);
+	
+	// Ensure component has enough instances
+	if (PointCloudComponent->GetInstanceCount() < MaxInstances)
 	{
-		Rotator->RotationRate = FRotator(0.f, 20.f, 0.f);
-		Rotator->RegisterComponent();
+		TArray<FTransform> PlaceholderTransforms;
+		for (int32 i = PointCloudComponent->GetInstanceCount(); i < MaxInstances; i++)
+		{
+			FTransform Transform;
+			// Start at old position if available, otherwise new position
+			FVector StartPos = (i < OldPositions.Num()) ? OldPositions[i] : (i < NewPositions.Num() ? NewPositions[i] : FVector::ZeroVector);
+			Transform.SetLocation(StartPos);
+			// Use adaptive sphere size, fallback to default
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.1f;
+			Transform.SetScale3D(FVector(SphereSize));
+			PlaceholderTransforms.Add(Transform);
+		}
+		if (PlaceholderTransforms.Num() > 0)
+		{
+			PointCloudComponent->AddInstances(PlaceholderTransforms, false, true);
+		}
 	}
 	
-	// Apply transform AFTER root component is set
-	MeshActor->SetActorLocation(Location);
-	MeshActor->SetActorRotation(Rotation);
-	MeshActor->SetActorScale3D(Scale);
-	
-	// Also apply transform to the root component directly to ensure it sticks
-	if (USceneComponent* RootComp = MeshActor->GetRootComponent())
+	// Update batch - smooth interpolation between old and new positions
+	for (int32 i = MorphUpdateIndex; i < BatchEnd; i++)
 	{
-		RootComp->SetWorldLocation(Location);
-		RootComp->SetWorldRotation(Rotation);
-		RootComp->SetWorldScale3D(Scale);
+		FVector InterpPos = FVector::ZeroVector;
+		FColor InterpColor = FColor::White;
+		
+		if (i < OldPositions.Num() && i < NewPositions.Num())
+		{
+			// Smooth interpolation between old and new positions
+			InterpPos = FMath::Lerp(OldPositions[i], NewPositions[i], EasedProgress);
+			
+			// Smooth color interpolation
+			FLinearColor OldLinear = OldColors[i].ReinterpretAsLinear();
+			FLinearColor NewLinear = NewColors[i].ReinterpretAsLinear();
+			FLinearColor InterpLinear = FMath::Lerp(OldLinear, NewLinear, EasedProgress);
+			InterpColor = InterpLinear.ToFColor(true);
+		}
+		else if (i < NewPositions.Num())
+		{
+			// New point - fade in from old position or start position
+			FVector StartPos = (i < OldPositions.Num()) ? OldPositions[i] : NewPositions[i];
+			InterpPos = FMath::Lerp(StartPos, NewPositions[i], EasedProgress);
+			InterpColor = NewColors[i];
+			InterpColor.A = FMath::RoundToInt(EasedProgress * 255.0f); // Fade in
+		}
+		else if (i < OldPositions.Num())
+		{
+			// Old point fading out
+			InterpPos = OldPositions[i];
+			InterpColor = OldColors[i];
+			InterpColor.A = FMath::RoundToInt((1.0f - EasedProgress) * 255.0f); // Fade out
+		}
+		
+		if (i < PointCloudComponent->GetInstanceCount())
+		{
+			FTransform Transform;
+			Transform.SetLocation(InterpPos);
+			// Use adaptive sphere size, fallback to default
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.08f;
+			Transform.SetScale3D(FVector(SphereSize));
+			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			
+			PointCloudComponent->SetCustomDataValue(i, 0, FMath::Clamp(InterpColor.R / 255.0f, 0.0f, 1.0f));
+			PointCloudComponent->SetCustomDataValue(i, 1, FMath::Clamp(InterpColor.G / 255.0f, 0.0f, 1.0f));
+			PointCloudComponent->SetCustomDataValue(i, 2, FMath::Clamp(InterpColor.B / 255.0f, 0.0f, 1.0f));
+			PointCloudComponent->SetCustomDataValue(i, 3, FMath::Clamp(InterpColor.A / 255.0f, 0.0f, 1.0f));
+		}
 	}
 	
-	// Load and apply M_VertexColor material with fallbacks
-	UMaterial* VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
-	if (!VertexColorMat)
-	{
-		VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Game/M_VertexColor.M_VertexColor"));
-	}
-	if (!VertexColorMat)
-	{
-		VertexColorMat = LoadObject<UMaterial>(nullptr, TEXT("/Engine/EditorMaterials/WidgetVertexColorMaterial"));
-	}
-	if (VertexColorMat)
-	{
-		VertexColorMat->TwoSided = true;  // Allow both sides to be visible
-		MeshComp->SetMaterial(0, VertexColorMat);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Applied M_VertexColor material (TwoSided)"));
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] M_VertexColor material not found in any location"));
-	}
-
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Spawned mesh at %s"), *Location.ToString());
+	PointCloudComponent->MarkRenderStateDirty();
 	
-	// Clear spawn lock
-	bIsSpawningActor = false;
-	return MeshActor;
+	MorphUpdateIndex = BatchEnd;
+	if (MorphUpdateIndex >= MaxInstances)
+	{
+		MorphUpdateIndex = 0;
+	}
 }
 
-UProceduralMeshComponent* USplatCreatorSubsystem::CreateProceduralMeshFromOBJ(const FString& OBJPath, AActor* Owner)
+void USplatCreatorSubsystem::CompleteMorph()
 {
-	TArray<FVector> Vertices;
-	TArray<int32> Triangles;
-	TArray<FVector> Normals;
-	TArray<FColor> Colors;
-
-	if (!ParseOBJFile(OBJPath, Vertices, Triangles, Normals, Colors))
+	if (MorphTimer.IsValid() && GetWorld())
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to parse OBJ file"));
-		return nullptr;
+		GetWorld()->GetTimerManager().ClearTimer(MorphTimer);
 	}
-
-	UProceduralMeshComponent* MeshComp = NewObject<UProceduralMeshComponent>(Owner);
-	if (!MeshComp)
+	
+	bIsMorphing = false;
+	MorphProgress = 0.0f;
+	MorphUpdateIndex = 0;
+	
+	// Ensure final state
+	if (PointCloudComponent && NewPositions.Num() > 0)
 	{
-		return nullptr;
+		for (int32 i = 0; i < NewPositions.Num() && i < PointCloudComponent->GetInstanceCount(); i++)
+		{
+			FTransform Transform;
+			Transform.SetLocation(NewPositions[i]);
+			// Use adaptive sphere size, fallback to default
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.1f;
+			Transform.SetScale3D(FVector(SphereSize));
+			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			
+			if (i < NewColors.Num())
+			{
+				PointCloudComponent->SetCustomDataValue(i, 0, NewColors[i].R / 255.0f);
+				PointCloudComponent->SetCustomDataValue(i, 1, NewColors[i].G / 255.0f);
+				PointCloudComponent->SetCustomDataValue(i, 2, NewColors[i].B / 255.0f);
+				PointCloudComponent->SetCustomDataValue(i, 3, NewColors[i].A / 255.0f);
+			}
+		}
+		
+		PointCloudComponent->MarkRenderStateDirty();
 	}
-
-	MeshComp->SetupAttachment(Owner->GetRootComponent());
-	
-	TArray<FVector2D> EmptyUVs;
-	TArray<FProcMeshTangent> EmptyTangents;
-	
-	MeshComp->CreateMeshSection(0, Vertices, Triangles, Normals, EmptyUVs, Colors, EmptyTangents, false);
-	MeshComp->RegisterComponent();
-
-	return MeshComp;
 }
-
-bool USplatCreatorSubsystem::ParseOBJFile(
-    const FString& OBJPath,
-    TArray<FVector>& OutVertices,
-    TArray<int32>& OutTriangles,
-    TArray<FVector>& OutNormals,
-    TArray<FColor>& OutColors
-){
-    TArray<FString> Lines;
-    if (!FFileHelper::LoadFileToStringArray(Lines, *OBJPath))
-    {
-        UE_LOG(LogTemp, Error, TEXT("[OBJ] Cannot read file"));
-        return false;
-    }
-
-    TArray<FVector> Positions;
-    TArray<FVector> Normals;
-    TArray<FColor>  Colors;
-
-    struct FOBJIndex { int32 v, vn; };
-    TArray<TArray<FOBJIndex>> Faces;
-
-    for (const FString& Line : Lines)
-    {
-        FString L = Line.TrimStart();
-
-        if (L.StartsWith("v "))
-        {
-            TArray<FString> P;
-            L.ParseIntoArray(P, TEXT(" "));
-
-            Positions.Add(FVector(FCString::Atof(*P[1]), FCString::Atof(*P[2]), FCString::Atof(*P[3])));
-
-            if (P.Num() >= 7)
-            {
-                Colors.Add(FLinearColor(
-                    FCString::Atof(*P[4]) / 255.f,
-                    FCString::Atof(*P[5]) / 255.f,
-                    FCString::Atof(*P[6]) / 255.f
-                ).ToFColor(true));
-            }
-            else Colors.Add(FColor::White);
-        }
-        else if (L.StartsWith("vn "))
-        {
-            TArray<FString> P;
-            L.ParseIntoArray(P, TEXT(" "));
-            Normals.Add(FVector(FCString::Atof(*P[1]), FCString::Atof(*P[2]), FCString::Atof(*P[3])));
-        }
-        else if (L.StartsWith("f "))
-        {
-            TArray<FString> P;
-            L.ParseIntoArray(P, TEXT(" "));
-            TArray<FOBJIndex> Face;
-
-            for (int i = 1; i < P.Num(); i++)
-            {
-                TArray<FString> Idx;
-                P[i].ParseIntoArray(Idx, TEXT("/"));
-
-                FOBJIndex I;
-                I.v  = (Idx.Num() > 0) ? FCString::Atoi(*Idx[0]) - 1 : -1;
-                I.vn = (Idx.Num() > 2 && !Idx[2].IsEmpty()) ? FCString::Atoi(*Idx[2]) - 1 : -1;
-                Face.Add(I);
-            }
-            Faces.Add(Face);
-        }
-    }
-
-    OutVertices.Empty();
-    OutTriangles.Empty();
-    OutColors.Empty();
-    OutNormals.Empty();
-
-    for (auto& Face : Faces)
-    {
-        for (int32 i = 1; i < Face.Num() - 1; i++)
-        {
-            FOBJIndex Idx[3] = {Face[0], Face[i], Face[i+1]};
-
-            for (int j = 0; j < 3; j++)
-            {
-                int32 V = Idx[j].v;
-                int32 Index = OutVertices.Add(Positions[V]);
-
-                OutTriangles.Add(Index);
-                OutColors.Add(Colors[V]);
-                
-                if (Idx[j].vn >= 0 && Idx[j].vn < Normals.Num())
-                    OutNormals.Add(Normals[Idx[j].vn]);
-                else
-                    OutNormals.Add(FVector::ZeroVector);
-            }
-        }
-    }
-
-    UE_LOG(LogTemp, Display, TEXT("[OBJ] Parsed %d vertices, %d triangles"), OutVertices.Num(), OutTriangles.Num()/3);
-    return true;
-}
-
-
-
-

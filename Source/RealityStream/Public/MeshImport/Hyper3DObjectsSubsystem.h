@@ -27,6 +27,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void DeactivateObjectImports();
 
+	// Set the reference location for object positioning (objects will be placed relative to this location)
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
+	void SetReferenceLocation(const FVector& ReferenceLocation);
+
 protected:
 	virtual UWorld* GetWorld() const override;
 
@@ -35,6 +39,8 @@ private:
 	{
 		FString SourceObjPath;
 		TWeakObjectPtr<AActor> Actor;
+		float BaseX = 0.f;  // Random X position in box
+		float BaseY = 0.f;  // Random Y position in box
 		float BaseAngle = 0.f;
 		float OrbitRadius = 300.f;
 		float RotationSpeed = 0.3f; // radians per second
@@ -121,18 +127,21 @@ private:
 	TArray<FObjectInstance> ObjectInstances;
 
 	// Cached settings
-	float BaseOrbitRadius = 300.f;  // Reduced from 1200.f for closer orbit
-	float OrbitRadiusVariance = 150.f;  // Reduced from 600.f for closer orbit
-	float BaseHeight = 200.f;
-	float HeightVariance = 200.f;
-	float BaseRotationSpeed = 0.2f; // radians/sec
-	float RotationSpeedVariance = 0.15f;
-	float BaseBobFrequency = 0.35f; // Hz
+	float BaseOrbitRadius = 100.f;  // Fixed radius for circle layout (no orbiting) - reduced to bring closer to origin
+	float OrbitRadiusVariance = 50.f;  // Variance in circle radius - reduced
+	float BaseHeight = 0.f;  // Base height for objects
+	float HeightVariance = 100.f;  // Height variance for different heights
+	float BaseRotationSpeed = 0.0f; // No rotation since we're not orbiting
+	float RotationSpeedVariance = 0.0f;
+	float BaseBobFrequency = 0.35f; // Hz - bobbing frequency
 	float BobFrequencyVariance = 0.25f;
-	float BaseBobAmplitude = 80.f; // cm
-	float BobAmplitudeVariance = 40.f;
-	float ImportScaleMultiplier = 100.f;
+	float BaseBobAmplitude = 10.f; // cm - minimal bobbing amplitude
+	float BobAmplitudeVariance = 5.f; // Minimal variance
+	float ImportScaleMultiplier = 15.0f; // Smaller size for better scene matching
 	FRotator BaseMeshRotation = FRotator(0.f, 0.f, -90.f);
+
+	// Reference location for object positioning (defaults to origin)
+	FVector ReferenceLocation = FVector::ZeroVector;
 
 	bool bImportsActive = false;
 };

@@ -68,8 +68,6 @@ EComfyConnectionStatus UComfyStreamComponent::GetConnectionStatus() const
 
 void UComfyStreamComponent::OnTextureReceivedInternal(UTexture2D* Texture)
 {
-	if (!Texture) return;
-
 	// If lerp smoothing is disabled, broadcast immediately
 	if (!StreamConfig.bEnableLerpSmoothing)
 	{

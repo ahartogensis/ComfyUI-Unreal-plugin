@@ -4,7 +4,7 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "SplatCreatorSubsystem.generated.h"
 
-class UProceduralMeshComponent;
+class UHierarchicalInstancedStaticMeshComponent;
 
 UCLASS(BlueprintType)
 class REALITYSTREAM_API USplatCreatorSubsystem : public UGameInstanceSubsystem
@@ -15,52 +15,45 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
-	//Entry point: Reconstruct video → spawn Gaussian mesh or import existing PLY 
+	// Start the point cloud system - CALL THIS FROM BLUEPRINT to initialize
+	// In Blueprint: Get Splat Creator Subsystem -> Start Point Cloud System
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
-	void CheckAndImportSplat(const FString& VideoPath = TEXT(""));
+	void StartPointCloudSystem();
 
 private:
-	// Auto-cycle through PLY files
+	bool bIsInitialized = false;
+	// PLY file management
 	TArray<FString> PlyFiles;
 	int32 CurrentFileIndex = 0;
-	AActor* CurrentMeshActor = nullptr;
-	FTimerHandle LoopTimer;
-	FString CurrentlyConvertingFile; // Track which file is being converted to avoid duplicate conversions
-	bool bIsShuttingDown = false; // Track if subsystem is shutting down to prevent async crashes
-	bool bIsSpawningActor = false; // Track if we're currently spawning an actor to prevent concurrent spawns
-
-	// Docker container management
-	void StartDockerContainer();
-	void StopDockerContainer();
-	bool IsDockerContainerRunning();
-	bool EnsureDockerContainerRunning();
+	FTimerHandle CycleTimer;
+	
+	// Point cloud rendering
+	AActor* CurrentPointCloudActor = nullptr;
+	UHierarchicalInstancedStaticMeshComponent* PointCloudComponent = nullptr;
+	
+	// Morphing transition - smooth interpolation between point clouds
+	FTimerHandle MorphTimer;
+	bool bIsMorphing = false;
+	TArray<FVector> OldPositions;
+	TArray<FVector> NewPositions;
+	TArray<FColor> OldColors;
+	TArray<FColor> NewColors;
+	TArray<float> SphereSizes; // Adaptive sphere sizes for each point
+	float MorphProgress = 0.0f;
+	float MorphDuration = 1.5f; // Total morph duration
+	float MorphStartTime = 0.0f;
+	int32 MorphUpdateIndex = 0;
+	
+	// Functions
 	void ScanForPLYFiles();
-	void CycleMeshes();
-	void StartAutoCycleTimer();
-
-	bool bHasStartedImportLoop = false;
-
-	// Convert current PLY to OBJ
-	void ConvertCurrentPLY();
-
-	// Core pipeline
-	void ImportExistingSplat();
-	void ProcessVideoToMesh(const FString& VideoPath);
-	bool RunDockerReconstructionPipeline(const FString& VideoPath);
-
-	// File operations
-	bool ConvertPLYToOBJ(const FString& PLYPath, const FString& OBJPath);
-	bool ConvertPLYToOBJ_Internal(const FString& PLYPath, const FString& OBJPath);
-	FString GetProjectDirectory() const;
-	FString GetOutputDirectory() const;
-	FString GetDataDirectory() const;
-
-	// Runtime import
-	AActor* ImportAndSpawnOBJMesh(const FString& OBJPath, FVector Location, FRotator Rotation, FVector Scale);
-	UProceduralMeshComponent* CreateProceduralMeshFromOBJ(const FString& OBJPath, AActor* Owner);
-	bool ParseOBJFile(const FString& OBJPath, TArray<FVector>& OutVertices, TArray<int32>& OutTriangles, TArray<FVector>& OutNormals, TArray<FColor>& OutColors);
-
-	// Async auto-spawn polling
-	FTimerHandle AutoSpawnTimer;
-	void CheckAndAutoSpawnMesh();
+	void CycleToNextPLY();
+	void LoadPLYFile(const FString& PLYPath);
+	bool ParsePLYFile(const FString& PLYPath, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
+	void FilterByOcclusion(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
+	void CalculateAdaptiveSphereSizes(const TArray<FVector>& Positions, TArray<float>& OutSphereSizes);
+	void CreatePointCloud(const TArray<FVector>& Positions, const TArray<FColor>& Colors);
+	void UpdateMorph();
+	void CompleteMorph();
+	
+	FString GetSplatCreatorFolder() const;
 };

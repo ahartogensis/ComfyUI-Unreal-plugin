@@ -13,6 +13,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void EmptyLinkFunctionForGeneratedCodeHyper3DObjectsSubsystem() {}
 
 // ********** Begin Cross Module References ********************************************************
+COREUOBJECT_API UScriptStruct* Z_Construct_UScriptStruct_FVector();
 ENGINE_API UClass* Z_Construct_UClass_UGameInstanceSubsystem();
 ENGINE_API UClass* Z_Construct_UClass_UTexture2D_NoRegister();
 REALITYSTREAM_API UClass* Z_Construct_UClass_UHyper3DObjectsSubsystem();
@@ -80,6 +81,58 @@ DEFINE_FUNCTION(UHyper3DObjectsSubsystem::execDeactivateObjectImports)
 }
 // ********** End Class UHyper3DObjectsSubsystem Function DeactivateObjectImports ******************
 
+// ********** Begin Class UHyper3DObjectsSubsystem Function SetReferenceLocation *******************
+struct Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics
+{
+	struct Hyper3DObjectsSubsystem_eventSetReferenceLocation_Parms
+	{
+		FVector ReferenceLocation;
+	};
+#if WITH_METADATA
+	static constexpr UECodeGen_Private::FMetaDataPairParam Function_MetaDataParams[] = {
+		{ "Category", "Hyper3DObjects" },
+#if !UE_BUILD_SHIPPING
+		{ "Comment", "// Set the reference location for object positioning (objects will be placed relative to this location)\n" },
+#endif
+		{ "ModuleRelativePath", "Public/MeshImport/Hyper3DObjectsSubsystem.h" },
+#if !UE_BUILD_SHIPPING
+		{ "ToolTip", "Set the reference location for object positioning (objects will be placed relative to this location)" },
+#endif
+	};
+	static constexpr UECodeGen_Private::FMetaDataPairParam NewProp_ReferenceLocation_MetaData[] = {
+		{ "NativeConst", "" },
+	};
+#endif // WITH_METADATA
+	static const UECodeGen_Private::FStructPropertyParams NewProp_ReferenceLocation;
+	static const UECodeGen_Private::FPropertyParamsBase* const PropPointers[];
+	static const UECodeGen_Private::FFunctionParams FuncParams;
+};
+const UECodeGen_Private::FStructPropertyParams Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::NewProp_ReferenceLocation = { "ReferenceLocation", nullptr, (EPropertyFlags)0x0010000008000182, UECodeGen_Private::EPropertyGenFlags::Struct, RF_Public|RF_Transient|RF_MarkAsNative, nullptr, nullptr, 1, STRUCT_OFFSET(Hyper3DObjectsSubsystem_eventSetReferenceLocation_Parms, ReferenceLocation), Z_Construct_UScriptStruct_FVector, METADATA_PARAMS(UE_ARRAY_COUNT(NewProp_ReferenceLocation_MetaData), NewProp_ReferenceLocation_MetaData) };
+const UECodeGen_Private::FPropertyParamsBase* const Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::PropPointers[] = {
+	(const UECodeGen_Private::FPropertyParamsBase*)&Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::NewProp_ReferenceLocation,
+};
+static_assert(UE_ARRAY_COUNT(Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::PropPointers) < 2048);
+const UECodeGen_Private::FFunctionParams Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::FuncParams = { { (UObject*(*)())Z_Construct_UClass_UHyper3DObjectsSubsystem, nullptr, "SetReferenceLocation", Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::PropPointers, UE_ARRAY_COUNT(Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::PropPointers), sizeof(Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::Hyper3DObjectsSubsystem_eventSetReferenceLocation_Parms), RF_Public|RF_Transient|RF_MarkAsNative, (EFunctionFlags)0x04C20401, 0, 0, METADATA_PARAMS(UE_ARRAY_COUNT(Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::Function_MetaDataParams), Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::Function_MetaDataParams)},  };
+static_assert(sizeof(Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::Hyper3DObjectsSubsystem_eventSetReferenceLocation_Parms) < MAX_uint16);
+UFunction* Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation()
+{
+	static UFunction* ReturnFunction = nullptr;
+	if (!ReturnFunction)
+	{
+		UECodeGen_Private::ConstructUFunction(&ReturnFunction, Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation_Statics::FuncParams);
+	}
+	return ReturnFunction;
+}
+DEFINE_FUNCTION(UHyper3DObjectsSubsystem::execSetReferenceLocation)
+{
+	P_GET_STRUCT_REF(FVector,Z_Param_Out_ReferenceLocation);
+	P_FINISH;
+	P_NATIVE_BEGIN;
+	P_THIS->SetReferenceLocation(Z_Param_Out_ReferenceLocation);
+	P_NATIVE_END;
+}
+// ********** End Class UHyper3DObjectsSubsystem Function SetReferenceLocation *********************
+
 // ********** Begin Class UHyper3DObjectsSubsystem *************************************************
 void UHyper3DObjectsSubsystem::StaticRegisterNativesUHyper3DObjectsSubsystem()
 {
@@ -87,6 +140,7 @@ void UHyper3DObjectsSubsystem::StaticRegisterNativesUHyper3DObjectsSubsystem()
 	static const FNameNativePtrPair Funcs[] = {
 		{ "ActivateObjectImports", &UHyper3DObjectsSubsystem::execActivateObjectImports },
 		{ "DeactivateObjectImports", &UHyper3DObjectsSubsystem::execDeactivateObjectImports },
+		{ "SetReferenceLocation", &UHyper3DObjectsSubsystem::execSetReferenceLocation },
 	};
 	FNativeFunctionRegistrar::RegisterFunctions(Class, Funcs, UE_ARRAY_COUNT(Funcs));
 }
@@ -144,6 +198,7 @@ struct Z_Construct_UClass_UHyper3DObjectsSubsystem_Statics
 	static constexpr FClassFunctionLinkInfo FuncInfo[] = {
 		{ &Z_Construct_UFunction_UHyper3DObjectsSubsystem_ActivateObjectImports, "ActivateObjectImports" }, // 4231357277
 		{ &Z_Construct_UFunction_UHyper3DObjectsSubsystem_DeactivateObjectImports, "DeactivateObjectImports" }, // 3013261247
+		{ &Z_Construct_UFunction_UHyper3DObjectsSubsystem_SetReferenceLocation, "SetReferenceLocation" }, // 3626677501
 	};
 	static_assert(UE_ARRAY_COUNT(FuncInfo) < 2048);
 	static constexpr FCppClassTypeInfoStatic StaticCppClassTypeInfo = {
@@ -195,10 +250,10 @@ UHyper3DObjectsSubsystem::~UHyper3DObjectsSubsystem() {}
 struct Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_MeshImport_Hyper3DObjectsSubsystem_h__Script_RealityStream_Statics
 {
 	static constexpr FClassRegisterCompiledInInfo ClassInfo[] = {
-		{ Z_Construct_UClass_UHyper3DObjectsSubsystem, UHyper3DObjectsSubsystem::StaticClass, TEXT("UHyper3DObjectsSubsystem"), &Z_Registration_Info_UClass_UHyper3DObjectsSubsystem, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UHyper3DObjectsSubsystem), 3655299707U) },
+		{ Z_Construct_UClass_UHyper3DObjectsSubsystem, UHyper3DObjectsSubsystem::StaticClass, TEXT("UHyper3DObjectsSubsystem"), &Z_Registration_Info_UClass_UHyper3DObjectsSubsystem, CONSTRUCT_RELOAD_VERSION_INFO(FClassReloadVersionInfo, sizeof(UHyper3DObjectsSubsystem), 4078203849U) },
 	};
 };
-static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_MeshImport_Hyper3DObjectsSubsystem_h__Script_RealityStream_1512035833(TEXT("/Script/RealityStream"),
+static FRegisterCompiledInInfo Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_MeshImport_Hyper3DObjectsSubsystem_h__Script_RealityStream_4108685368(TEXT("/Script/RealityStream"),
 	Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_MeshImport_Hyper3DObjectsSubsystem_h__Script_RealityStream_Statics::ClassInfo, UE_ARRAY_COUNT(Z_CompiledInDeferFile_FID_Users_alexi_OneDrive_Documents_Unreal_Projects_Reconstruction_3D_Plugins_RealityStream_Source_RealityStream_Public_MeshImport_Hyper3DObjectsSubsystem_h__Script_RealityStream_Statics::ClassInfo),
 	nullptr, 0,
 	nullptr, 0);

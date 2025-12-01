@@ -71,18 +71,27 @@ void AComfyStreamActor::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 
 	//Update lerp and opacity fade for all actors
-	for (FActorLerpData& Data : ActorData)
+	for (int32 i = ActorData.Num() - 1; i >= 0; i--)
 	{
-		if (!IsValid(Data.Actor)) continue;
-
+		FActorLerpData& Data = ActorData[i];
+		
+		// Skip if actor is invalid
+		if (!IsValid(Data.Actor))
+		{
+			GetWorld()->GetTimerManager().ClearTimer(Data.DestroyTimer);
+			GetWorld()->GetTimerManager().ClearTimer(Data.LerpTimer);
+			ActorData.RemoveAt(i);
+			continue;
+		}
+		
 		//Update texture lerp
-		if (Data.bIsLerping && Data.Material)
+		if (Data.bIsLerping && IsValid(Data.Material))
 		{
 			UpdateActorLerp(Data, LatestFrame, DeltaTime);
 		}
 
 		//Update opacity fade-out
-		if (Data.bIsFadingOut && Data.Material)
+		if (Data.bIsFadingOut && IsValid(Data.Material))
 		{
 			Data.OpacityAlpha = FMath::Max(0.0f, Data.OpacityAlpha - (DeltaTime / FadeOutDuration));
 			Data.Material->SetScalarParameterValue(TEXT("Opacity"), Data.OpacityAlpha);
@@ -100,19 +109,9 @@ void AComfyStreamActor::Tick(float DeltaTime)
 				//Remove from ActorData
 				GetWorld()->GetTimerManager().ClearTimer(Data.DestroyTimer);
 				GetWorld()->GetTimerManager().ClearTimer(Data.LerpTimer);
+				ActorData.RemoveAt(i);
 				continue;
 			}
-		}
-	}
-
-	//Clean up invalid actors
-	for (int32 i = ActorData.Num() - 1; i >= 0; i--)
-	{
-		if (!IsValid(ActorData[i].Actor))
-		{
-			GetWorld()->GetTimerManager().ClearTimer(ActorData[i].DestroyTimer);
-			GetWorld()->GetTimerManager().ClearTimer(ActorData[i].LerpTimer);
-			ActorData.RemoveAt(i);
 		}
 	}
 }
@@ -121,10 +120,7 @@ void AComfyStreamActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	for (AActor* Actor : SpawnedTextureActors)
 	{
-		if (IsValid(Actor))
-		{
-			Actor->Destroy();
-		}
+		Actor->Destroy();
 	}
 	SpawnedTextureActors.Empty();
 	
@@ -150,8 +146,6 @@ void AComfyStreamActor::HandleStreamTexture(UTexture2D* Texture)
 		return;
 
 	const int32 Index = SeqIndex % 3;
-	UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] HandleStreamTexture: Received texture, assigning to Index %d (SeqIndex: %d), texture size: %dx%d"), 
-		Index, SeqIndex, Texture->GetSizeX(), Texture->GetSizeY());
 	FrameBuffer->PushTexture(Texture, Index);
 	SeqIndex++;
 
@@ -173,12 +167,6 @@ void AComfyStreamActor::HandleStreamError(const FString& Error)
 
 void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 {
-	// Ensure actor is still valid
-	if (!IsValid(this) || !IsValidLowLevel())
-	{
-		return;
-	}
-
 	LatestFrame = Frame;
 	ApplyTexturesToMaterial(Frame);
 	UpdatePlacementFromDepth(Frame);
@@ -186,62 +174,23 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 
 void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 {
-	// Ensure we're on game thread and have valid material
-	if (!IsInGameThread())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] ApplyTexturesToMaterial called from non-game thread"));
-		return;
-	}
-
-	if (!IsValid(DynMat))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Material not valid"));
-		return;
-	}
-
 	static const FName RGBParam  = TEXT("RGB_Map");
 	static const FName DepthParam= TEXT("Depth_Map");
 	static const FName MaskParam = TEXT("Mask_Map");
 
-	// Add validity checks for textures before using them
-	if (IsValid(Frame.RGB))
-	{
-		DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
-	}
-	if (IsValid(Frame.Depth))
-	{
-		DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
-	}
-	if (IsValid(Frame.Mask))
-	{
-		DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
-	}
+	DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
+	DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
+	DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
 }
 
 void AComfyStreamActor::UpdatePlacementFromDepth(const FComfyFrame& Frame)
 {
-	// Ensure we're on game thread
-	if (!IsInGameThread())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] UpdatePlacementFromDepth called from non-game thread"));
-		return;
-	}
-
-	if (!IsValid(Reconstruction) || !IsValid(Frame.Depth))
-	{
-		return;
-	}
-
 	//1) average depth in masked area
 	float d01 = 0.5f;
-	UTexture2D* DepthTex = IsValid(Frame.Depth) ? Frame.Depth : nullptr;
-	UTexture2D* MaskTex = IsValid(Frame.Mask) ? Frame.Mask : nullptr;
+	UTexture2D* DepthTex = Frame.Depth;
+	UTexture2D* MaskTex = Frame.Mask;
 	
-	if (DepthTex && !Reconstruction->AverageNormalizedDepth(DepthTex, MaskTex, d01, 8))
-	{
-		//fallback 
-		d01 = 0.5f;
-	}
+	Reconstruction->AverageNormalizedDepth(DepthTex, MaskTex, d01, 8);
 
 	//2) map to world-units 
 	//for DepthAnything: d01~1.0 near, ~0.0 far
@@ -250,12 +199,8 @@ void AComfyStreamActor::UpdatePlacementFromDepth(const FComfyFrame& Frame)
 	const float Zdist = FMath::Lerp(Far, Near, FMath::Clamp(d01, 0.0f, 1.0f));
 
 	//3) estimate intrinsics from RGB size or depth based on what is available
-	UTexture2D* SizeTex = IsValid(Frame.RGB) ? Frame.RGB : (IsValid(Frame.Depth) ? Frame.Depth : nullptr);
-	if (!SizeTex)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] No valid texture for size estimation"));
-		return;
-	}
+	UTexture2D* SizeTex = Frame.RGB ? Frame.RGB : Frame.Depth;
+	if (!SizeTex) return;
 	
 	const int32 W = SizeTex->GetSizeX();
 	const int32 H = SizeTex->GetSizeY();
@@ -277,14 +222,8 @@ void AComfyStreamActor::UpdatePlacementFromDepth(const FComfyFrame& Frame)
 
 void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVector& WorldPosition)
 {
-	// Ensure we're on game thread and actor is valid
-	if (!IsInGameThread() || !IsValid(this))
-	{
-		return;
-	}
-
 	AActor* Actor = FindOrSpawnActorAtLocation(WorldPosition);
-	if (!IsValid(Actor)) return;
+	if (!Actor) return;
 
 	//Find or create actor data entry
 	FActorLerpData* ActorDataPtr = nullptr;
@@ -307,54 +246,47 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 	}
 
 	//Update textures with lerp if material exists
-	if (IsValid(ActorDataPtr->Material))
+	if (ActorDataPtr->Material)
 	{
 		//Set new textures - update directly (smooth transition handled by material if it supports it)
-		if (IsValid(Frame.RGB)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
-		if (IsValid(Frame.Depth)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
-		if (IsValid(Frame.Mask)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
+		ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
+		ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
+		ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
 
 		//If material supports lerp alpha parameter, enable lerping
 		float LerpParam = 0.0f;
-		if (IsValid(ActorDataPtr->Material) && ActorDataPtr->Material->GetScalarParameterValue(TEXT("LerpAlpha"), LerpParam))
+		if (ActorDataPtr->Material->GetScalarParameterValue(TEXT("LerpAlpha"), LerpParam))
 		{
 			ActorDataPtr->LerpAlpha = 0.0f;
 			ActorDataPtr->bIsLerping = true;
 			//Set new textures as target for lerp
-			if (IsValid(Frame.RGB)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
-			if (IsValid(Frame.Depth)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
-			if (IsValid(Frame.Mask)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
+			ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
+			ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
+			ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
 		}
 	}
 	else
 	{
 			//First time - apply textures directly
-			if (!IsValid(Actor)) return;
 			UStaticMeshComponent* MeshComp = Actor->FindComponentByClass<UStaticMeshComponent>();
-			if (IsValid(MeshComp) && IsValid(BaseMaterial))
+			if (MeshComp && BaseMaterial)
 			{
 				ActorDataPtr->Material = UMaterialInstanceDynamic::Create(BaseMaterial, Actor);
-				if (IsValid(ActorDataPtr->Material))
-				{
-					if (IsValid(Frame.RGB)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
-					if (IsValid(Frame.Depth)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
-					if (IsValid(Frame.Mask)) ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
-					ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
-					MeshComp->SetMaterial(0, ActorDataPtr->Material);
-					ActorDataPtr->LerpAlpha = 1.0f;
-					ActorDataPtr->OpacityAlpha = 1.0f;
-				}
+				ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
+				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
+				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
+				ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
+				MeshComp->SetMaterial(0, ActorDataPtr->Material);
+				ActorDataPtr->LerpAlpha = 1.0f;
+				ActorDataPtr->OpacityAlpha = 1.0f;
 			}
 	}
 
 	//Reset destroy timer and opacity
-	if (IsValid(this) && GetWorld())
-	{
-		GetWorld()->GetTimerManager().ClearTimer(ActorDataPtr->DestroyTimer);
-	}
+	GetWorld()->GetTimerManager().ClearTimer(ActorDataPtr->DestroyTimer);
 	ActorDataPtr->OpacityAlpha = 1.0f;
 	ActorDataPtr->bIsFadingOut = false;
-	if (IsValid(ActorDataPtr->Material))
+	if (ActorDataPtr->Material)
 	{
 		ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
 	}
@@ -364,12 +296,11 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 AActor* AComfyStreamActor::FindOrSpawnActorAtLocation(const FVector& WorldPosition)
 {
 	UWorld* World = GetWorld();
-	if (!World) return nullptr;
 
 	//Check for existing actor at same location
 	for (FActorLerpData& Data : ActorData)
 	{
-		if (IsValid(Data.Actor) && FVector::Dist(Data.Position, WorldPosition) < LocationThreshold)
+		if (Data.Actor && FVector::Dist(Data.Position, WorldPosition) < LocationThreshold)
 		{
 			return Data.Actor;
 		}
@@ -378,18 +309,9 @@ AActor* AComfyStreamActor::FindOrSpawnActorAtLocation(const FVector& WorldPositi
 	//No existing actor - spawn new one
 	FRotator DisplayRotation = DisplayMesh ? DisplayMesh->GetComponentRotation() : FRotator(90, 0, -90);
 	AActor* SpawnedActor = World->SpawnActor<AActor>(AActor::StaticClass(), WorldPosition, DisplayRotation);
-	if (!SpawnedActor) return nullptr;
 
 	UStaticMeshComponent* MeshComp = NewObject<UStaticMeshComponent>(SpawnedActor);
-	if (DisplayMesh && DisplayMesh->GetStaticMesh())
-	{
-		MeshComp->SetStaticMesh(DisplayMesh->GetStaticMesh());
-	}
-	else
-	{
-		SpawnedActor->Destroy();
-		return nullptr;
-	}
+	MeshComp->SetStaticMesh(DisplayMesh->GetStaticMesh());
 	
 	MeshComp->RegisterComponent();
 	SpawnedActor->SetRootComponent(MeshComp);
@@ -403,7 +325,7 @@ AActor* AComfyStreamActor::FindOrSpawnActorAtLocation(const FVector& WorldPositi
 
 void AComfyStreamActor::UpdateActorLerp(FActorLerpData& Data, const FComfyFrame& Frame, float DeltaTime)
 {
-	if (!Data.bIsLerping || !Data.Material) return;
+	if (!Data.bIsLerping || !IsValid(Data.Material)) return;
 
 	Data.LerpAlpha = FMath::Clamp(Data.LerpAlpha + (DeltaTime * LerpSpeed), 0.0f, 1.0f);
 	Data.Material->SetScalarParameterValue(TEXT("LerpAlpha"), Data.LerpAlpha);
@@ -428,8 +350,6 @@ void AComfyStreamActor::UpdateActorLerp(FActorLerpData& Data, const FComfyFrame&
 
 void AComfyStreamActor::DestroyActorDelayed(AActor* Actor)
 {
-	if (!Actor || !GetWorld()) return;
-
 	//Find actor data
 	FActorLerpData* ActorDataPtr = nullptr;
 	for (FActorLerpData& Data : ActorData)
@@ -441,14 +361,12 @@ void AComfyStreamActor::DestroyActorDelayed(AActor* Actor)
 		}
 	}
 
-	if (!ActorDataPtr) return;
-
 	//Start fade-out timer - after lifetime expires, begin opacity fade
 	GetWorld()->GetTimerManager().SetTimer(
 		ActorDataPtr->DestroyTimer,
 		[this, ActorDataPtr]()
 		{
-			if (IsValid(ActorDataPtr->Actor) && ActorDataPtr->Material)
+			if (ActorDataPtr->Actor && ActorDataPtr->Material)
 			{
 				//Start opacity fade-out
 				ActorDataPtr->bIsFadingOut = true;

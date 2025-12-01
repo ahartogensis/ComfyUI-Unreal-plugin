@@ -133,6 +133,18 @@ void UHyper3DObjectsSubsystem::DeactivateObjectImports()
 	DestroyAllObjects();
 }
 
+void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLocation)
+{
+	ReferenceLocation = InReferenceLocation;
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Reference location set to: %s"), *ReferenceLocation.ToString());
+	
+	// Update object positions immediately if objects are already spawned
+	if (bImportsActive)
+	{
+		UpdateObjectMotion();
+	}
+}
+
 void UHyper3DObjectsSubsystem::HandlePostWorldInit(UWorld* World, const UWorld::InitializationValues IVS)
 {
 	if (!World || !World->IsGameWorld())
@@ -325,17 +337,22 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 		return;
 	}
 
-	const float AngleStep = (2.0f * PI) / static_cast<float>(Count);
 	FRandomStream Stream(12345); // deterministic layout
+	const float BoxSize = 200.0f; // 200x200 box
+	const float HalfBoxSize = BoxSize * 0.5f; // -100 to +100
 
 	for (int32 Index = 0; Index < Count; ++Index)
 	{
 		FObjectInstance& Instance = ObjectInstances[Index];
-		Instance.BaseAngle = AngleStep * Index;
-		Instance.OrbitRadius = BaseOrbitRadius + Stream.FRandRange(-OrbitRadiusVariance, OrbitRadiusVariance);
-		Instance.RotationSpeed = BaseRotationSpeed + Stream.FRandRange(-RotationSpeedVariance, RotationSpeedVariance);
+		// Randomly place objects in a 50x50 box centered at origin
+		Instance.BaseX = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
+		Instance.BaseY = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
+		// No rotation speed needed since we're not orbiting
+		Instance.RotationSpeed = 0.0f;
+		// More dramatic bobbing with varied frequencies
 		Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
 		Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
+		// Random height variation for each object
 		Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
 	}
 }
@@ -363,17 +380,18 @@ void UHyper3DObjectsSubsystem::UpdateObjectMotion()
 			continue;
 		}
 
-		const float Angle = Instance.BaseAngle + Time * Instance.RotationSpeed;
-		const float X = FMath::Cos(Angle) * Instance.OrbitRadius;
-		const float Y = FMath::Sin(Angle) * Instance.OrbitRadius;
+		// Use random positions from 100x100 box (already set in UpdateObjectLayout)
+		const float X = Instance.BaseX;
+		const float Y = Instance.BaseY;
+		// Bob up and down (Z axis) with varied amplitude
 		const float Height = Instance.BaseHeight + FMath::Sin(Time * PI * Instance.BobFrequency * 2.0f) * Instance.BobAmplitude;
 
-		const FVector Location(X, Y, Height);
+		// Position relative to reference location
+		const FVector Location = ReferenceLocation + FVector(X, Y, Height);
 		Actor->SetActorLocation(Location);
 
-		const float FacingAngleDegrees = Hyper3DObjectsImport::DegsPerRad(Angle) + 90.0f;
-		const FRotator FacingRotation(0.0f, FacingAngleDegrees, 0.0f);
-		Actor->SetActorRotation(BaseMeshRotation + FacingRotation);
+		// Keep base rotation, no facing rotation since we're not orbiting
+		Actor->SetActorRotation(BaseMeshRotation);
 	}
 }
 
