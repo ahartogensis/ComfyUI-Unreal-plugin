@@ -42,6 +42,7 @@ A Unreal Engine 5.6 plugin for real-time segmentation, 3D reconstruction, and po
 
 1. Add a `ComfyStreamActor` to your level
 2. Set the `Base Material` property to a material with these texture parameters:
+   - You can use the M_displacement asset 
    - `RGB_Map` (Texture2D Parameter)
    - `Depth_Map` (Texture2D Parameter)
    - `Mask_Map` (Texture2D Parameter)
@@ -52,18 +53,6 @@ A Unreal Engine 5.6 plugin for real-time segmentation, 3D reconstruction, and po
    - **Channel Number**: WebSocket channel number (default: 1)
    - **Auto Reconnect**: Enable automatic reconnection
 4. The actor will automatically connect and start receiving textures
-
-#### Material Requirements
-
-Your material must have these exact texture parameter names:
-- `RGB_Map` - RGB texture from ComfyUI
-- `Depth_Map` - Depth texture from ComfyUI  
-- `Mask_Map` - Mask texture from ComfyUI
-
-Optional parameters for advanced features:
-- `Opacity` - Controls actor fade-out
-- `LerpAlpha` - Controls texture interpolation (0-1)
-- `RGB_Map_New`, `Depth_Map_New`, `Mask_Map_New` - Target textures for lerping
 
 #### Blueprint Events
 
@@ -91,12 +80,15 @@ StreamActor->ConnectSegmentationChannel();
 
 ### SplatCreator Setup
 
-1. Place PLY files in: `Plugins/RealityStream/SplatCreatorData/`
+1. Place PLY files in: `Plugins/RealityStream/SplatCreatorOutputs/`
 2. In Blueprint or C++, call:
    ```
    Get Splat Creator Subsystem -> Start Point Cloud System
    ```
-3. The system will automatically:
+
+3. Place the M_VertexColor material in your project for the color.
+   
+4. The system will automatically:
    - Scan for PLY files
    - Load and display the first point cloud
    - Cycle through files automatically
@@ -123,9 +115,14 @@ The plugin expects PLY files with:
    ```
    Get Hyper 3D Objects Subsystem -> Activate Object Imports
    ```
-4. Objects will be imported and animated automatically
+
+4. Place the M_ProceduralMeshTexture material in your project for the color.
+   
+5. Objects will be imported and animated automatically
 
 ## Configuration
+
+Premade blueprints are included in the Blueprints folder. 
 
 ### ComfyStream Configuration
 
@@ -276,12 +273,12 @@ RealityStream/
 ### SplatCreator Issues
 
 1. **No point clouds visible**:
-   - Verify PLY files are in `SplatCreatorData/` folder
+   - Verify PLY files are in `SplatCreatorOutputs/` folder
    - Check that `StartPointCloudSystem()` was called
    - Verify PLY files contain vertex positions and colors
 
 2. **Performance issues**:
-   - Point clouds are automatically sampled to 100,000 points max
+   - Point clouds are automatically sampled to 100,000 points max to prevent unnecessary culling. 
    - Adjust sphere sizes in code if needed
 
 ### Hyper3DObjects Issues
