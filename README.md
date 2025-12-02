@@ -30,6 +30,8 @@ A Unreal Engine 5.6 plugin for real-time segmentation, 3D reconstruction, and po
 
 ## Installation
 
+Premade blueprints and materials are included in the Blueprints and Materials folder. 
+
 1. Copy the `RealityStream` folder to your project's `Plugins` directory
 2. Regenerate project files (Right-click `.uproject` → Generate Visual Studio project files)
 3. Compile your project in Unreal Engine 5.6
@@ -122,7 +124,6 @@ The plugin expects PLY files with:
 
 ## Configuration
 
-Premade blueprints are included in the Blueprints folder. 
 
 ### ComfyStream Configuration
 
