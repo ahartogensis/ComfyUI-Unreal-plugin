@@ -1,11 +1,17 @@
 #include "MeshImport/Hyper3DObjectsSubsystem.h"
+#include "SplatCreator/SplatCreatorSubsystem.h"
 
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
 #include "GameFramework/Actor.h"
 #include "Components/SceneComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "ProceduralMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "StaticMeshResources.h"
+#include "RawIndexBuffer.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 #include "HAL/FileManager.h"
@@ -18,6 +24,9 @@
 #include "Modules/ModuleManager.h"
 #include "IImageWrapper.h"
 #include "IImageWrapperModule.h"
+#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/DateTime.h"
 
 #if WITH_EDITOR
 #include "AssetToolsModule.h"
@@ -117,6 +126,41 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 		return;
 	}
 
+	// Try to get splat dimensions and center, then set BoxSize and ReferenceLocation accordingly
+	if (UGameInstance* GameInstance = World->GetGameInstance())
+	{
+		if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
+		{
+			FVector2D SplatDimensions = SplatSubsystem->GetSplatDimensions();
+			FVector SplatCenter = SplatSubsystem->GetSplatCenter();
+			
+			// Use the larger of X or Y as the box size (square box)
+			float SplatBoxSize = FMath::Max(SplatDimensions.X, SplatDimensions.Y);
+			if (SplatBoxSize > 0.0f)
+			{
+				BoxSize = SplatBoxSize;
+				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Set BoxSize to splat dimensions: %.1f (from splat X=%.1f, Y=%.1f)"), 
+					BoxSize, SplatDimensions.X, SplatDimensions.Y);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Splat dimensions invalid, using default BoxSize: %.1f"), BoxSize);
+			}
+			
+			// Set reference location to splat center so objects are placed inside the splat
+			SetReferenceLocation(SplatCenter);
+			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Set ReferenceLocation to splat center: %s"), *SplatCenter.ToString());
+			
+			// Get dense point regions for object placement (0.15 = sphere size threshold for dense regions)
+			DensePointRegions = SplatSubsystem->GetDensePointRegions(0.15f);
+			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found %d dense point regions for object placement"), DensePointRegions.Num());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] SplatCreatorSubsystem not found, using default BoxSize: %.1f"), BoxSize);
+		}
+	}
+
 	StartTimers(World);
 	RefreshObjects();
 }
@@ -142,6 +186,50 @@ void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLo
 	if (bImportsActive)
 	{
 		UpdateObjectMotion();
+	}
+}
+
+void UHyper3DObjectsSubsystem::SetBoxSize(float InBoxSize)
+{
+	BoxSize = FMath::Max(0.0f, InBoxSize); // Ensure non-negative
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Box size set to: %.2f"), BoxSize);
+	
+	// Update object layout immediately if objects are already spawned
+	if (bImportsActive)
+	{
+		UpdateObjectLayout();
+		UpdateObjectMotion();
+	}
+}
+
+void UHyper3DObjectsSubsystem::SetBobAmplitudeVariance(float InBobAmplitudeVariance)
+{
+	BobAmplitudeVariance = FMath::Max(0.0f, InBobAmplitudeVariance); // Ensure non-negative
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Bob amplitude variance set to: %.2f"), BobAmplitudeVariance);
+	
+	// Update object layout immediately if objects are already spawned
+	if (bImportsActive)
+	{
+		UpdateObjectLayout();
+		UpdateObjectMotion();
+	}
+}
+
+void UHyper3DObjectsSubsystem::SetTotalInstances(int32 InTotalInstances)
+{
+	int32 OldValue = TotalInstances;
+	TotalInstances = FMath::Max(1, InTotalInstances); // Ensure at least 1
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Total instances changed from %d to %d (will be randomly distributed across all OBJ files)"), OldValue, TotalInstances);
+	
+	// Refresh objects to spawn/remove instances as needed
+	if (bImportsActive)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Refreshing objects to update instance count..."));
+		RefreshObjects();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Imports are not active. Call ActivateObjectImports() first to see the changes."));
 	}
 }
 
@@ -249,19 +337,20 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		return;
 	}
 
-	auto RemoveObjectAt = [this](int32 Index)
+	auto RemoveObjectGroupAt = [this](int32 Index)
 	{
 		if (!ObjectInstances.IsValidIndex(Index))
 		{
 			return;
 		}
 
-		if (AActor* Actor = ObjectInstances[Index].Actor.Get())
+		FObjectInstance& Instance = ObjectInstances[Index];
+		if (AActor* Actor = Instance.Actor.Get())
 		{
 			Actor->Destroy();
 		}
 
-		if (UTexture2D* Texture = ObjectInstances[Index].DiffuseTexture.Get())
+		if (UTexture2D* Texture = Instance.DiffuseTexture.Get())
 		{
 			LoadedTextures.Remove(Texture);
 		}
@@ -288,35 +377,117 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 	}
 
-	// Remove stale objects
+	// Remove stale objects (objects whose OBJ file no longer exists)
 	for (int32 Index = ObjectInstances.Num() - 1; Index >= 0; --Index)
 	{
 		FObjectInstance& Instance = ObjectInstances[Index];
 		if (!DesiredPathSet.Contains(Instance.SourceObjPath))
 		{
-			RemoveObjectAt(Index);
+			// Remove from cache as well
+			MeshDataCache.Remove(Instance.SourceObjPath);
+			RemoveObjectGroupAt(Index);
 		}
 		else if (!Instance.Actor.IsValid())
 		{
-			RemoveObjectAt(Index);
+			RemoveObjectGroupAt(Index);
 		}
 	}
 
-	// Spawn new objects
-	for (const FString& FullPath : DesiredPathList)
+	// Count total instances across all OBJ files
+	int32 CurrentTotalInstances = 0;
+	for (const FObjectInstance& Instance : ObjectInstances)
 	{
-		bool bAlreadySpawned = ObjectInstances.ContainsByPredicate(
-			[&FullPath](const FObjectInstance& Instance)
-			{
-				return Instance.SourceObjPath == FullPath;
-			});
-
-		if (!bAlreadySpawned)
+		if (Instance.Actor.IsValid())
 		{
-			if (!SpawnObjectFromOBJ(FullPath))
+			CurrentTotalInstances++;
+		}
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found %d OBJ files, current total instances: %d, target: %d"), 
+		DesiredPathList.Num(), CurrentTotalInstances, TotalInstances);
+
+	// Remove excess instances if we have too many (remove randomly)
+	if (CurrentTotalInstances > TotalInstances)
+	{
+		int32 InstancesToRemove = CurrentTotalInstances - TotalInstances;
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Removing %d excess instances"), InstancesToRemove);
+		
+		FRandomStream RandomStream(FDateTime::Now().GetTicks());
+		TArray<int32> ValidIndices;
+		for (int32 Index = 0; Index < ObjectInstances.Num(); ++Index)
+		{
+			if (ObjectInstances[Index].Actor.IsValid())
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn object for %s"), *FullPath);
+				ValidIndices.Add(Index);
 			}
+		}
+		
+		// Shuffle and remove
+		for (int32 i = 0; i < InstancesToRemove && ValidIndices.Num() > 0; ++i)
+		{
+			int32 RandomIndex = RandomStream.RandRange(0, ValidIndices.Num() - 1);
+			int32 InstanceIndex = ValidIndices[RandomIndex];
+			ValidIndices.RemoveAt(RandomIndex);
+			RemoveObjectGroupAt(InstanceIndex);
+		}
+	}
+	// Spawn additional instances if we have too few (spawn randomly across OBJ files)
+	else if (CurrentTotalInstances < TotalInstances && DesiredPathList.Num() > 0)
+	{
+		int32 InstancesToSpawn = TotalInstances - CurrentTotalInstances;
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Need to spawn %d more instances (randomly distributed)"), InstancesToSpawn);
+		
+		// Ensure all OBJ files are cached
+		for (const FString& FullPath : DesiredPathList)
+		{
+			FCachedMeshData* CachedData = MeshDataCache.Find(FullPath);
+			if (!CachedData || !CachedData->bIsValid)
+			{
+				// Load and cache the OBJ data
+				FCachedMeshData NewCache;
+				FString MtlFile;
+				if (LoadOBJ(FullPath, NewCache.Vertices, NewCache.Triangles, NewCache.Normals, NewCache.UVs, NewCache.Colors, MtlFile))
+				{
+					NewCache.MtlFile = MtlFile;
+					NewCache.TextureSet = ResolveAllTexturesForOBJ(FullPath, MtlFile);
+					NewCache.bIsValid = true;
+					MeshDataCache.Add(FullPath, NewCache);
+					UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Cached OBJ data for %s"), *FPaths::GetCleanFilename(FullPath));
+				}
+			}
+		}
+		
+		// Spawn instances randomly across OBJ files
+		const int32 MaxSpawnPerFrame = 10; // Spawn up to 10 per refresh cycle
+		int32 SpawnCount = FMath::Min(InstancesToSpawn, MaxSpawnPerFrame);
+		
+		FRandomStream RandomStream(FDateTime::Now().GetTicks());
+		for (int32 i = 0; i < SpawnCount; ++i)
+		{
+			// Randomly pick an OBJ file
+			int32 RandomObjIndex = RandomStream.RandRange(0, DesiredPathList.Num() - 1);
+			const FString& SelectedObjPath = DesiredPathList[RandomObjIndex];
+			
+			FCachedMeshData* CachedData = MeshDataCache.Find(SelectedObjPath);
+			if (CachedData && CachedData->bIsValid)
+			{
+				if (!SpawnObjectFromCachedData(SelectedObjPath, *CachedData))
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
+				}
+				
+				// Yield to game thread every few spawns to prevent freezing
+				if ((i + 1) % 5 == 0)
+				{
+					FPlatformProcess::Sleep(0.001f); // 1ms sleep to yield
+				}
+			}
+		}
+		
+		if (SpawnCount < InstancesToSpawn)
+		{
+			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Spawned %d/%d instances this cycle. Will complete %d remaining in next refresh cycle."), 
+				SpawnCount, InstancesToSpawn, InstancesToSpawn - SpawnCount);
 		}
 	}
 
@@ -338,22 +509,50 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 	}
 
 	FRandomStream Stream(12345); // deterministic layout
-	const float BoxSize = 200.0f; // 200x200 box
-	const float HalfBoxSize = BoxSize * 0.5f; // -100 to +100
-
-	for (int32 Index = 0; Index < Count; ++Index)
+	
+	// Use dense regions if available, otherwise fall back to box placement
+	if (DensePointRegions.Num() > 0)
 	{
-		FObjectInstance& Instance = ObjectInstances[Index];
-		// Randomly place objects in a 50x50 box centered at origin
-		Instance.BaseX = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
-		Instance.BaseY = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
-		// No rotation speed needed since we're not orbiting
-		Instance.RotationSpeed = 0.0f;
-		// More dramatic bobbing with varied frequencies
-		Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
-		Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
-		// Random height variation for each object
-		Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+		// Place objects at random dense point locations
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FObjectInstance& Instance = ObjectInstances[Index];
+			
+			// Pick a random dense point
+			int32 RandomDenseIndex = Stream.RandRange(0, DensePointRegions.Num() - 1);
+			FVector DensePoint = DensePointRegions[RandomDenseIndex];
+			
+			// Convert to local coordinates relative to ReferenceLocation
+			FVector LocalPos = DensePoint - ReferenceLocation;
+			Instance.BaseX = LocalPos.X;
+			Instance.BaseY = LocalPos.Y;
+			
+			// More dramatic bobbing with varied frequencies
+			Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
+			Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
+			// Random height variation for each object
+			Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+		}
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in dense regions"), Count);
+	}
+	else
+	{
+		// Fallback to box placement if no dense regions available
+		const float HalfBoxSize = BoxSize * 0.5f; // -HalfBoxSize to +HalfBoxSize
+		
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FObjectInstance& Instance = ObjectInstances[Index];
+			// Randomly place objects in a box centered at origin
+			Instance.BaseX = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
+			Instance.BaseY = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
+			// More dramatic bobbing with varied frequencies
+			Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
+			Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
+			// Random height variation for each object
+			Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+		}
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in box (no dense regions available)"), Count);
 	}
 }
 
@@ -380,7 +579,7 @@ void UHyper3DObjectsSubsystem::UpdateObjectMotion()
 			continue;
 		}
 
-		// Use random positions from 100x100 box (already set in UpdateObjectLayout)
+		// Use random positions from box (already set in UpdateObjectLayout)
 		const float X = Instance.BaseX;
 		const float Y = Instance.BaseY;
 		// Bob up and down (Z axis) with varied amplitude
@@ -390,18 +589,20 @@ void UHyper3DObjectsSubsystem::UpdateObjectMotion()
 		const FVector Location = ReferenceLocation + FVector(X, Y, Height);
 		Actor->SetActorLocation(Location);
 
-		// Keep base rotation, no facing rotation since we're not orbiting
+		// Keep base rotation
 		Actor->SetActorRotation(BaseMeshRotation);
 	}
 }
 
-bool UHyper3DObjectsSubsystem::SpawnObjectFromOBJ(const FString& ObjPath)
+bool UHyper3DObjectsSubsystem::SpawnObjectGroupFromOBJ(const FString& ObjPath)
 {
 	if (!FPaths::FileExists(ObjPath))
 	{
 		return false;
 	}
 
+	double StartTime = FPlatformTime::Seconds();
+	
 	FString MtlFile;
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
@@ -409,13 +610,19 @@ bool UHyper3DObjectsSubsystem::SpawnObjectFromOBJ(const FString& ObjPath)
 	TArray<FVector2D> UVs;
 	TArray<FColor> Colors;
 
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Loading OBJ file: %s"), *FPaths::GetCleanFilename(ObjPath));
 	if (!LoadOBJ(ObjPath, Vertices, Triangles, Normals, UVs, Colors, MtlFile))
 	{
 		return false;
 	}
+	double LoadOBJTime = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] LoadOBJ took %.3f seconds, loaded %d vertices, %d triangles"), 
+		LoadOBJTime - StartTime, Vertices.Num(), Triangles.Num() / 3);
 
 	// Resolve all textures for this OBJ
 	FTextureSet TextureSet = ResolveAllTexturesForOBJ(ObjPath, MtlFile);
+	double TextureTime = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Texture resolution took %.3f seconds"), TextureTime - LoadOBJTime);
 	
 	// Load all textures
 	AActor* ObjectActor = CreateObjectActor(ObjPath, TextureSet);
@@ -466,6 +673,61 @@ bool UHyper3DObjectsSubsystem::SpawnObjectFromOBJ(const FString& ObjPath)
 	if (TextureSet.Roughness) LoadedTextures.Add(TextureSet.Roughness);
 	if (TextureSet.PBR) LoadedTextures.Add(TextureSet.PBR);
 	if (TextureSet.Shaded) LoadedTextures.Add(TextureSet.Shaded);
+
+	double TotalTime = FPlatformTime::Seconds() - StartTime;
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Total spawn time: %.3f seconds for %s"), TotalTime, *FPaths::GetCleanFilename(ObjPath));
+
+	return true;
+}
+
+bool UHyper3DObjectsSubsystem::SpawnObjectFromCachedData(const FString& ObjPath, const FCachedMeshData& CachedData)
+{
+	if (!CachedData.bIsValid)
+	{
+		return false;
+	}
+
+	// Load all textures (these are already resolved in the cache)
+	AActor* ObjectActor = CreateObjectActor(ObjPath, const_cast<FTextureSet&>(CachedData.TextureSet));
+	if (!ObjectActor)
+	{
+		return false;
+	}
+
+	UProceduralMeshComponent* MeshComp = CreateProceduralMeshFromOBJ(
+		ObjectActor,
+		CachedData.Vertices,
+		CachedData.Triangles,
+		CachedData.Normals,
+		CachedData.UVs,
+		CachedData.Colors);
+	if (!MeshComp)
+	{
+		ObjectActor->Destroy();
+		return false;
+	}
+
+	ObjectActor->SetActorScale3D(FVector(ImportScaleMultiplier));
+	ObjectActor->SetActorRotation(BaseMeshRotation);
+	if (USceneComponent* RootComponent = ObjectActor->GetRootComponent())
+	{
+		RootComponent->SetWorldScale3D(FVector(ImportScaleMultiplier));
+		RootComponent->SetWorldRotation(BaseMeshRotation);
+	}
+
+	ApplyMaterial(MeshComp, ObjectActor, CachedData.TextureSet, CachedData.Colors);
+
+	FObjectInstance Instance;
+	Instance.SourceObjPath = ObjPath;
+	Instance.Actor = ObjectActor;
+	Instance.DiffuseTexture = CachedData.TextureSet.Diffuse;
+	Instance.MetallicTexture = CachedData.TextureSet.Metallic;
+	Instance.NormalTexture = CachedData.TextureSet.Normal;
+	Instance.RoughnessTexture = CachedData.TextureSet.Roughness;
+	Instance.PBRTexture = CachedData.TextureSet.PBR;
+	Instance.ShadedTexture = CachedData.TextureSet.Shaded;
+
+	ObjectInstances.Add(Instance);
 
 	return true;
 }
@@ -596,6 +858,8 @@ UProceduralMeshComponent* UHyper3DObjectsSubsystem::CreateProceduralMeshFromOBJ(
 	TArray<FProcMeshTangent> Tangents;
 	MeshComp->CreateMeshSection(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
 	MeshComp->SetMobility(EComponentMobility::Movable);
+	// Disable collision - make objects non-collidable
+	MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MeshComp->RegisterComponent();
 
 	return MeshComp;
@@ -1408,6 +1672,7 @@ void UHyper3DObjectsSubsystem::DestroyAllObjects()
 
 	ObjectInstances.Empty();
 	LoadedTextures.Empty();
+	MeshDataCache.Empty(); // Clear cache when destroying all objects
 }
 
 

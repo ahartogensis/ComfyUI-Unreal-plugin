@@ -13,6 +13,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/LocalPlayer.h"
 #include "Math/RotationMatrix.h"
+#include "Math/RandomStream.h"
+#include "Math/Box.h"
 
 void USplatCreatorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -433,7 +435,7 @@ void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPosition
 	// No culling - keep all points, but limit total count for performance
 	// Use uniform sampling to reduce from 2M to manageable number while maintaining mesh-like appearance
 	// Reduced significantly to avoid HISM internal culling issues
-	const int32 MaxPoints = 170000;
+	const int32 MaxPoints = 100000;
 	
 	if (InPositions.Num() <= MaxPoints)
 	{
@@ -480,14 +482,15 @@ void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>&
 	OutSphereSizes.Empty(NumPoints);
 	OutSphereSizes.Reserve(NumPoints);
 	
-	// Min and max cube sizes (in scale units)
-	const float MinCubeSize = 0.01f;   // Small cube for high density areas
-	const float MaxCubeSize = 0.1f;   // Large cube for sparse areas
-	const float BaseCubeSize = 0.05f;  // Default size for dense clusters
+		// Min and max cube sizes (in scale units)
+		// Increased sizes slightly to create visible radius while still minimizing z-fighting
+		const float MinCubeSize = 0.03f;   // Increased to create visible radius
+		const float MaxCubeSize = 0.10f;   // Increased to create visible radius (3.3x ratio maintained)
+		const float BaseCubeSize = 0.05f;  // Default size for dense clusters
 	
 	// Search radius for finding nearest neighbors (in scaled world units)
 	// Increased to account for scaled positions (125x scaling)
-	const float SearchRadius = 1.0f;
+	const float SearchRadius = 10.0f;
 	
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculating adaptive sphere sizes for %d points (SearchRadius=%.1f)..."), NumPoints, SearchRadius);
 	
@@ -529,10 +532,9 @@ void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>&
 		else
 		{
 			// Map distance: small distance (high density) -> small sphere, large distance (sparse) -> large sphere
-			// Use a threshold: distances < 50 units = dense (0.1), distances > 200 units = sparse (0.3)
-			// Linear interpolation between thresholds
-			const float DenseThreshold = 50.0f;  // Below this = dense (0.1)
-			const float SparseThreshold = 200.0f; // Above this = sparse (0.3)
+			// Adjusted thresholds for smoother blending
+			const float DenseThreshold = 40.0f;  // Below this = dense
+			const float SparseThreshold = 120.0f; // Above this = sparse
 			
 			if (NearestDistance <= DenseThreshold)
 			{
@@ -544,12 +546,17 @@ void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>&
 			}
 			else
 			{
-				// Interpolate between dense and sparse thresholds
+				// Smooth interpolation with ease-in-out curve for better blending
 				float T = (NearestDistance - DenseThreshold) / (SparseThreshold - DenseThreshold);
-				SphereSize = FMath::Lerp(MinCubeSize, MaxCubeSize, T);
+				// Apply ease-in-out curve: smooth start and end, faster in middle
+				float EasedT = T < 0.5f 
+					? 2.0f * T * T 
+					: 1.0f - FMath::Pow(-2.0f * T + 2.0f, 2.0f) / 2.0f;
+				SphereSize = FMath::Lerp(MinCubeSize, MaxCubeSize, EasedT);
 			}
 		}
 		
+		// No multiplier - use increased base sizes to avoid z-fighting while maintaining density illusion
 		OutSphereSizes.Add(FMath::Clamp(SphereSize, MinCubeSize, MaxCubeSize));
 	}
 	
@@ -599,6 +606,14 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	PointCloudComponent->bDisableCollision = true;
 	PointCloudComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	
+	// Enable depth sorting and adjust rendering to reduce z-fighting
+	PointCloudComponent->SetDepthPriorityGroup(SDPG_World);
+	PointCloudComponent->SetRenderCustomDepth(false);
+	// Disable depth testing for overlapping instances to reduce z-fighting
+	// Note: This may cause some rendering order issues but eliminates z-fighting
+	PointCloudComponent->bUseAsOccluder = false;
+	PointCloudComponent->SetTranslucentSortPriority(1); // Higher priority for better sorting
+	
 	// Try to reduce HISM's internal culling aggressiveness
 	// Note: HISM uses an octree structure internally, and reducing instance count helps
 	
@@ -611,19 +626,61 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	}
 	if (Material)
 	{
-		PointCloudComponent->SetMaterial(0, Material);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set material: %s"), *Material->GetName());
+		// Try to create a Material Instance Dynamic to enhance visibility and contrast
+		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(Material, CurrentPointCloudActor);
+		if (DynamicMaterial)
+		{
+			// Lower emissive intensity while maintaining radius (sphere sizes)
+			// Try common emissive parameter names
+			DynamicMaterial->SetVectorParameterValue(TEXT("EmissiveColor"), FLinearColor(0.4f, 0.4f, 0.4f, 1.0f));
+			DynamicMaterial->SetScalarParameterValue(TEXT("EmissiveIntensity"), 1.0f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("Emissive"), 1.0f);
+			// Try bloom/glow radius parameters if they exist
+			DynamicMaterial->SetScalarParameterValue(TEXT("BloomIntensity"), 1.0f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("GlowRadius"), 4.0f); // Keep radius
+			DynamicMaterial->SetScalarParameterValue(TEXT("GlowIntensity"), 1.0f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("BloomScale"), 2.0f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("GlowScale"), 2.0f);
+			
+			// Add contrast and color enhancement parameters
+			// Try common parameter names - these will only apply if the material has these parameters exposed
+			DynamicMaterial->SetScalarParameterValue(TEXT("Contrast"), 1.5f); // Increase contrast (1.0 = no change, >1.0 = more contrast)
+			DynamicMaterial->SetScalarParameterValue(TEXT("Saturation"), 1.3f); // Increase saturation for more vibrant colors
+			DynamicMaterial->SetScalarParameterValue(TEXT("Brightness"), 1.1f); // Slight brightness boost
+			DynamicMaterial->SetScalarParameterValue(TEXT("ColorMultiplier"), 1.2f); // Color intensity multiplier
+			
+			// Try alternative parameter names that might exist in the material
+			DynamicMaterial->SetScalarParameterValue(TEXT("ContrastAmount"), 1.5f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("SaturationAmount"), 1.3f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("ColorIntensity"), 1.2f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("Intensity"), 1.2f);
+			DynamicMaterial->SetScalarParameterValue(TEXT("Vibrance"), 1.3f);
+			
+			PointCloudComponent->SetMaterial(0, DynamicMaterial);
+			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created Material Instance Dynamic with emissive and contrast properties"));
+		}
+		else
+		{
+			PointCloudComponent->SetMaterial(0, Material);
+			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set material: %s (failed to create MID)"), *Material->GetName());
+		}
 	}
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to load material"));
 	}
 	
-	PointCloudComponent->RegisterComponent();
+	// Set component as root BEFORE registering (critical for proper bounds calculation)
 	CurrentPointCloudActor->SetRootComponent(PointCloudComponent);
 	
 	// Position actor at origin
 	CurrentPointCloudActor->SetActorLocation(FVector::ZeroVector);
+	
+	// Register component (must be done after setting as root component)
+	PointCloudComponent->RegisterComponent();
+	
+	// Force HISM to always render (disable all forms of culling)
+	PointCloudComponent->SetCanEverAffectNavigation(false);
 	
 	// Calculate adaptive sphere sizes based on point density
 	// Scale positions first (same scaling as used for rendering: 125.0f)
@@ -648,14 +705,15 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		Transforms.Reserve(BatchEnd - BatchStart);
 		
 		// Offset to move PLY down (negative Z in Unreal = down)
-		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f); //
+		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f);
+		
 		for (int32 i = BatchStart; i < BatchEnd; i++)
 		{
 			FTransform Transform;
-			// Scale positions and apply downward offset
+			// Scale positions and apply downward offset (no jitter)
 			Transform.SetLocation(Positions[i] * 125.0f + DownOffset);
 			// Use adaptive sphere size, fallback to default if not calculated
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.1f;
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			Transform.SetScale3D(FVector(SphereSize));
 			Transforms.Add(Transform);
 		}
@@ -668,6 +726,41 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		}
 	}
 	
+	// Force update bounds after all instances are added (critical for preventing culling)
+	// Calculate explicit bounds from all positions
+	if (Positions.Num() > 0)
+	{
+		FBox BoundingBox(ForceInit);
+		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f);
+		for (const FVector& Pos : Positions)
+		{
+			FVector ScaledPos = Pos * 125.0f + DownOffset;
+			BoundingBox += ScaledPos;
+		}
+		
+		// Expand bounds to account for sphere sizes
+		float MaxSphereSize = 0.1f; // Max cube size from adaptive sizing
+		BoundingBox = BoundingBox.ExpandBy(MaxSphereSize * 50.0f); // Expand by max sphere radius
+		
+		// Force HISM to use these bounds
+		PointCloudComponent->UpdateBounds();
+		PointCloudComponent->MarkRenderStateDirty();
+		
+		// Store bounds for external access
+		CurrentSplatBounds = BoundingBox;
+		bHasSplatBounds = true;
+		
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set explicit bounds: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
+			BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
+			BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
+	}
+	
+	// Final visibility and culling overrides
+	PointCloudComponent->SetVisibility(true);
+	PointCloudComponent->SetHiddenInGame(false);
+	PointCloudComponent->SetCullDistances(0, 0); // Ensure no distance culling
+	PointCloudComponent->MarkRenderStateDirty();
+	
 	// Set colors
 	for (int32 i = 0; i < NumInstances && i < Colors.Num(); i++)
 	{
@@ -678,6 +771,9 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	}
 	
 	PointCloudComponent->MarkRenderStateDirty();
+	
+	// Store current point positions (scaled and offset) for dense region detection
+	CurrentPointPositions = ScaledPositions;
 	
 	// Store sphere sizes for morphing (already calculated above)
 	
@@ -722,7 +818,7 @@ void USplatCreatorSubsystem::UpdateMorph()
 			FVector StartPos = (i < OldPositions.Num()) ? OldPositions[i] : (i < NewPositions.Num() ? NewPositions[i] : FVector::ZeroVector);
 			Transform.SetLocation(StartPos);
 			// Use adaptive sphere size, fallback to default
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.1f;
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			Transform.SetScale3D(FVector(SphereSize));
 			PlaceholderTransforms.Add(Transform);
 		}
@@ -770,7 +866,7 @@ void USplatCreatorSubsystem::UpdateMorph()
 			FTransform Transform;
 			Transform.SetLocation(InterpPos);
 			// Use adaptive sphere size, fallback to default
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.08f;
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			Transform.SetScale3D(FVector(SphereSize));
 			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
 			
@@ -809,7 +905,7 @@ void USplatCreatorSubsystem::CompleteMorph()
 			FTransform Transform;
 			Transform.SetLocation(NewPositions[i]);
 			// Use adaptive sphere size, fallback to default
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.1f;
+			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			Transform.SetScale3D(FVector(SphereSize));
 			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
 			
@@ -823,5 +919,84 @@ void USplatCreatorSubsystem::CompleteMorph()
 		}
 		
 		PointCloudComponent->MarkRenderStateDirty();
+		
+		// Update bounds and store positions after morph completes
+		if (NewPositions.Num() > 0)
+		{
+			FBox BoundingBox(ForceInit);
+			for (const FVector& Pos : NewPositions)
+			{
+				BoundingBox += Pos;
+			}
+			CurrentSplatBounds = BoundingBox;
+			bHasSplatBounds = true;
+			
+			// Store current positions for dense region detection
+			CurrentPointPositions = NewPositions;
+			
+			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated bounds after morph: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
+				BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
+				BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
+		}
 	}
+}
+
+FVector2D USplatCreatorSubsystem::GetSplatDimensions() const
+{
+	if (!bHasSplatBounds)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning default (200x200)"));
+		return FVector2D(200.0f, 200.0f);
+	}
+	
+	FVector BoxSize = CurrentSplatBounds.GetSize();
+	FVector2D Dimensions(BoxSize.X, BoxSize.Y);
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat dimensions: X=%.1f, Y=%.1f"), Dimensions.X, Dimensions.Y);
+	return Dimensions;
+}
+
+FVector USplatCreatorSubsystem::GetSplatCenter() const
+{
+	if (!bHasSplatBounds)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning origin"));
+		return FVector::ZeroVector;
+	}
+	
+	FVector Center = CurrentSplatBounds.GetCenter();
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s"), *Center.ToString());
+	return Center;
+}
+
+TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThreshold) const
+{
+	TArray<FVector> DenseRegions;
+	
+	if (CurrentPointPositions.Num() == 0 || SphereSizes.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No point positions or sphere sizes available"));
+		return DenseRegions;
+	}
+	
+	// Points with small sphere sizes indicate dense regions
+	// Small sphere sizes (like 0.1) indicate dense areas, large ones (0.3) indicate sparse areas
+	// DensityThreshold is the maximum sphere size to consider as dense (default 0.15 means sphere size <= 0.15 is dense)
+	const float MaxDenseSphereSize = DensityThreshold;
+	
+	int32 DenseCount = 0;
+	for (int32 i = 0; i < CurrentPointPositions.Num() && i < SphereSizes.Num(); i++)
+	{
+		// Small sphere size = dense region
+		if (SphereSizes[i] <= MaxDenseSphereSize)
+		{
+			DenseRegions.Add(CurrentPointPositions[i]);
+			DenseCount++;
+		}
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d dense points out of %d total (sphere size threshold: %.3f)"), 
+		DenseCount, CurrentPointPositions.Num(), MaxDenseSphereSize);
+	
+	return DenseRegions;
 }
