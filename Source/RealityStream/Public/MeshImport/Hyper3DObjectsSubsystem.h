@@ -33,10 +33,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void SetReferenceLocation(const FVector& ReferenceLocation);
 
-	// Set the box size for the volume that objects are placed in (default: 200x200)
-	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
-	void SetBoxSize(float InBoxSize);
-
 	// Set the height variance of the bobbing (variance in bobbing amplitude)
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void SetBobAmplitudeVariance(float InBobAmplitudeVariance);

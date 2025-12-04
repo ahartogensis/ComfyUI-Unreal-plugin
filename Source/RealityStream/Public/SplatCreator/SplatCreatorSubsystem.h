@@ -15,7 +15,6 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
-	// Start the point cloud system - CALL THIS FROM BLUEPRINT to initialize
 	// In Blueprint: Get Splat Creator Subsystem -> Start Point Cloud System
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	void StartPointCloudSystem();
@@ -24,18 +23,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	FVector2D GetSplatDimensions() const;
 
-	// Get the center position of the current splat's bounding box
-	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
-	FVector GetSplatCenter() const;
-
-	// Get dense point regions (points with high density) for object placement
 	// Returns positions of points that are in dense areas (small sphere sizes indicate density)
-	// DensityThreshold: maximum sphere size to consider as dense (default 0.15, where 0.1=dense, 0.3=sparse)
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	TArray<FVector> GetDensePointRegions(float DensityThreshold = 0.15f) const;
 
 private:
 	bool bIsInitialized = false;
+	
 	// PLY file management
 	TArray<FString> PlyFiles;
 	int32 CurrentFileIndex = 0;

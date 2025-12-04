@@ -43,14 +43,10 @@
 
 namespace Hyper3DObjectsImport
 {
-	// User's material with texture parameters (try this first!)
+	//first try the user's procedural texture
 	static constexpr TCHAR ProceduralMeshTextureMaterialPath[] = TEXT("/Game/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
 	static constexpr TCHAR ProceduralMeshTextureMaterialPathAlt[] = TEXT("/Game/ImportedTextures/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
-	// Try to use materials that exist in UE5.6
-	static constexpr TCHAR VertexColorMaterialPathA[] = TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor");
-	static constexpr TCHAR VertexColorMaterialPathB[] = TEXT("/Game/M_VertexColor.M_VertexColor");
-	static constexpr TCHAR EditorVertexColorMaterialPath[] = TEXT("/Engine/EditorMaterials/WidgetVertexColorMaterial");
-	// Try common UE5 material paths
+	//try the base game's materials
 	static constexpr TCHAR BasicMaterialPath[] = TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
 	static constexpr TCHAR DefaultMaterialPath[] = TEXT("/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial");
 
@@ -114,6 +110,7 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 {
 	if (bImportsActive)
 	{
+		//the objects are already importing
 		return;
 	}
 
@@ -122,20 +119,19 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 	UWorld* World = GetWorld();
 	if (!World)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Cannot activate imports - no valid world"));
+		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No valid World so can't import objects"));
 		return;
 	}
 
-	// Try to get splat dimensions and center, then set BoxSize and ReferenceLocation accordingly
+	//The Hyper3D meshes are randomly placed inside a box based on the Splat's dimensions
 	if (UGameInstance* GameInstance = World->GetGameInstance())
 	{
 		if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
 		{
 			FVector2D SplatDimensions = SplatSubsystem->GetSplatDimensions();
-			FVector SplatCenter = SplatSubsystem->GetSplatCenter();
 			
-			// Use the larger of X or Y as the box size (square box)
-			float SplatBoxSize = FMath::Max(SplatDimensions.X, SplatDimensions.Y);
+			//Use smaller dimension as the Box size 
+			float SplatBoxSize = FMath::Min(SplatDimensions.X, SplatDimensions.Y);
 			if (SplatBoxSize > 0.0f)
 			{
 				BoxSize = SplatBoxSize;
@@ -146,10 +142,6 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 			{
 				UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Splat dimensions invalid, using default BoxSize: %.1f"), BoxSize);
 			}
-			
-			// Set reference location to splat center so objects are placed inside the splat
-			SetReferenceLocation(SplatCenter);
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Set ReferenceLocation to splat center: %s"), *SplatCenter.ToString());
 			
 			// Get dense point regions for object placement (0.15 = sphere size threshold for dense regions)
 			DensePointRegions = SplatSubsystem->GetDensePointRegions(0.15f);
@@ -185,19 +177,6 @@ void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLo
 	// Update object positions immediately if objects are already spawned
 	if (bImportsActive)
 	{
-		UpdateObjectMotion();
-	}
-}
-
-void UHyper3DObjectsSubsystem::SetBoxSize(float InBoxSize)
-{
-	BoxSize = FMath::Max(0.0f, InBoxSize); // Ensure non-negative
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Box size set to: %.2f"), BoxSize);
-	
-	// Update object layout immediately if objects are already spawned
-	if (bImportsActive)
-	{
-		UpdateObjectLayout();
 		UpdateObjectMotion();
 	}
 }
@@ -377,13 +356,13 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 	}
 
-	// Remove stale objects (objects whose OBJ file no longer exists)
+	//Remove stale objects (objects whose OBJ file no longer exists)
 	for (int32 Index = ObjectInstances.Num() - 1; Index >= 0; --Index)
 	{
 		FObjectInstance& Instance = ObjectInstances[Index];
 		if (!DesiredPathSet.Contains(Instance.SourceObjPath))
 		{
-			// Remove from cache as well
+			//Remove from cache as well
 			MeshDataCache.Remove(Instance.SourceObjPath);
 			RemoveObjectGroupAt(Index);
 		}
@@ -393,7 +372,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 	}
 
-	// Count total instances across all OBJ files
+	//Count total instances across all OBJ files
 	int32 CurrentTotalInstances = 0;
 	for (const FObjectInstance& Instance : ObjectInstances)
 	{
@@ -406,7 +385,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found %d OBJ files, current total instances: %d, target: %d"), 
 		DesiredPathList.Num(), CurrentTotalInstances, TotalInstances);
 
-	// Remove excess instances if we have too many (remove randomly)
+	//Randomly remove excess instances if we have too many
 	if (CurrentTotalInstances > TotalInstances)
 	{
 		int32 InstancesToRemove = CurrentTotalInstances - TotalInstances;
@@ -422,7 +401,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 			}
 		}
 		
-		// Shuffle and remove
+		//Shuffle and remove
 		for (int32 i = 0; i < InstancesToRemove && ValidIndices.Num() > 0; ++i)
 		{
 			int32 RandomIndex = RandomStream.RandRange(0, ValidIndices.Num() - 1);
@@ -431,7 +410,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 			RemoveObjectGroupAt(InstanceIndex);
 		}
 	}
-	// Spawn additional instances if we have too few (spawn randomly across OBJ files)
+	//Spawn additional instances if we have too few (spawn randomly across OBJ files)
 	else if (CurrentTotalInstances < TotalInstances && DesiredPathList.Num() > 0)
 	{
 		int32 InstancesToSpawn = TotalInstances - CurrentTotalInstances;
@@ -458,7 +437,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 		
 		// Spawn instances randomly across OBJ files
-		const int32 MaxSpawnPerFrame = 10; // Spawn up to 10 per refresh cycle
+		const int32 MaxSpawnPerFrame = 5; // Spawn up to 10 per refresh cycle
 		int32 SpawnCount = FMath::Min(InstancesToSpawn, MaxSpawnPerFrame);
 		
 		FRandomStream RandomStream(FDateTime::Now().GetTicks());
@@ -527,7 +506,7 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 			Instance.BaseX = LocalPos.X;
 			Instance.BaseY = LocalPos.Y;
 			
-			// More dramatic bobbing with varied frequencies
+			//Bobbing with varied Frequencies 
 			Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
 			Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
 			// Random height variation for each object
@@ -775,20 +754,6 @@ AActor* UHyper3DObjectsSubsystem::CreateObjectActor(const FString& ObjPath, FTex
 #else
 		Texture = LoadTextureFromFile(TexturePath);
 #endif
-		
-		if (Texture)
-		{
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Successfully loaded texture: %s (Size: %dx%d)"), 
-				*Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY());
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to load texture from: %s"), *TexturePath);
-		}
-		
-		return Texture;
-	};
-	
 	if (TextureSet.Diffuse == nullptr)
 	{
 		FString DiffusePath = this->FindTextureInDirectory(Directory, TEXT("texture_diffuse"));
@@ -858,7 +823,6 @@ UProceduralMeshComponent* UHyper3DObjectsSubsystem::CreateProceduralMeshFromOBJ(
 	TArray<FProcMeshTangent> Tangents;
 	MeshComp->CreateMeshSection(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
 	MeshComp->SetMobility(EComponentMobility::Movable);
-	// Disable collision - make objects non-collidable
 	MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MeshComp->RegisterComponent();
 
@@ -1170,7 +1134,7 @@ UHyper3DObjectsSubsystem::FTextureSet UHyper3DObjectsSubsystem::FindAllTexturesI
 	if (PBRPath.IsEmpty()) PBRPath = FindTextureInDirectory(Directory, TEXT("pbr"));
 	if (!PBRPath.IsEmpty()) TextureSet.PBR = LoadTextureFromFile(PBRPath);
 	
-	FString ShadedPath = FindTextureInDirectory(Directory, TEXT("shaded"));
+	FString ShadedPath = FindTextureInDirectory(Directory, TEXT("texture_shaded"));
 	if (!ShadedPath.IsEmpty()) TextureSet.Shaded = LoadTextureFromFile(ShadedPath);
 	
 	return TextureSet;
@@ -1193,64 +1157,6 @@ FString UHyper3DObjectsSubsystem::FindFallbackTexture(const FString& ObjPath) co
 			return Candidate;
 		}
 	}
-
-	// Then try common texture names in the same directory
-	const TArray<FString> CommonTextureNames = { 
-		TEXT("texture_diffuse"), 
-		TEXT("diffuse"), 
-		TEXT("texture"), 
-		TEXT("albedo"), 
-		TEXT("base"), 
-		TEXT("color"),
-		TEXT("texture_pbr"),
-		TEXT("texture_normal"),
-		TEXT("texture_metallic"),
-		TEXT("texture_roughness"),
-		TEXT("shaded")
-	};
-
-	for (const FString& TextureName : CommonTextureNames)
-	{
-		for (const FString& Extension : PossibleExtensions)
-		{
-			const FString Candidate = Directory / (TextureName + Extension);
-			if (FPaths::FileExists(Candidate))
-			{
-				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found texture with common name: %s"), *Candidate);
-				return Candidate;
-			}
-		}
-	}
-
-	// Last resort: search for any image file in the directory
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Searching for any texture file in directory: %s"), *Directory);
-	TArray<FString> FoundFiles;
-	for (const FString& Extension : PossibleExtensions)
-	{
-		FString SearchPattern = TEXT("*") + Extension;
-		IFileManager::Get().FindFiles(FoundFiles, *(Directory / SearchPattern), true, false);
-		if (FoundFiles.Num() > 0)
-		{
-			// Prefer diffuse/albedo/base textures
-			for (const FString& File : FoundFiles)
-			{
-				FString LowerFile = File.ToLower();
-				if (LowerFile.Contains(TEXT("diffuse")) || LowerFile.Contains(TEXT("albedo")) || 
-				    LowerFile.Contains(TEXT("base")) || LowerFile.Contains(TEXT("color")) ||
-				    LowerFile.Contains(TEXT("texture")))
-				{
-					const FString Candidate = Directory / File;
-					UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found texture file: %s"), *Candidate);
-					return Candidate;
-				}
-			}
-			// If no preferred texture found, use the first one
-			const FString Candidate = Directory / FoundFiles[0];
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Using first found texture: %s"), *Candidate);
-			return Candidate;
-		}
-	}
-
 	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No texture found for OBJ: %s"), *ObjPath);
 	return FString();
 }
@@ -1428,69 +1334,8 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 			}
 		}
 	}
-	
-	// Try direct path loading
-	BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
-	}
-	if (BaseMaterial)
-	{
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via direct path: %s"), *BaseMaterial->GetPathName());
-		return BaseMaterial;
-	}
-	
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find M_ProceduralMeshTexture material. Searched paths:"));
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Falling back to default materials..."));
-	
-	// Fallback to other materials
-	BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::VertexColorMaterialPathA);
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::VertexColorMaterialPathB);
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::EditorVertexColorMaterialPath);
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::BasicMaterialPath);
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::DefaultMaterialPath);
-	}
-
-#if WITH_EDITOR
-	// If no material found, try to create a simple material with texture parameters
-	if (!BaseMaterial)
-	{
-		BaseMaterial = CreateMaterialWithTextureParameters();
-	}
-#endif
-
-	return BaseMaterial;
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] No ProceduralMeshTexture Found"));
 }
-
-#if WITH_EDITOR
-UMaterial* UHyper3DObjectsSubsystem::CreateMaterialWithTextureParameters() const
-{
-	// Material creation programmatically is complex in UE5
-	// For now, return nullptr and log a message
-	// The user should create a material manually with texture parameters:
-	// - BaseColor (Texture2D Parameter)
-	// - Normal (Texture2D Parameter) 
-	// - Metallic (Texture2D Parameter)
-	// - Roughness (Texture2D Parameter)
-	
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Material creation not implemented. Please create a material manually with texture parameters: BaseColor, Normal, Metallic, Roughness"));
-	return nullptr;
-}
-#endif
 
 void UHyper3DObjectsSubsystem::ApplyMaterial(
 	UProceduralMeshComponent* MeshComp,
@@ -1503,20 +1348,13 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 		return;
 	}
 
-	// Try to get a base material
+	//Try to get a base material
 	UMaterialInterface* BaseMaterial = GetOrCreateBaseMaterial();
 
 	if (!BaseMaterial)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find any base material. Trying to use default engine material."));
-		// Last resort: try to find any material in the engine
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/EngineMaterials/DefaultMaterial"));
-		
-		if (!BaseMaterial)
-		{
-			UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] No materials available. Mesh will be untextured."));
-			return;
-		}
+		UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] No materials available. Mesh will be untextured."));
+		return;
 	}
 
 	UObject* MaterialOuter = Owner ? static_cast<UObject*>(Owner) : static_cast<UObject*>(MeshComp);
