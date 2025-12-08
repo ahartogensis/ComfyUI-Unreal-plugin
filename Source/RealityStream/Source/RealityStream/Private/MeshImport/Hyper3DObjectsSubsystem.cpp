@@ -138,7 +138,8 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 		return;
 	}
 
-	// Try to get splat dimensions and center, then set BoxSize and ReferenceLocation accordingly
+	// Try to get splat dimensions if they're already available (otherwise wait for OnSplatBoundsUpdated delegate)
+	// This handles the case where splat was loaded before ActivateObjectImports() was called
 	UpdateFromSplatDimensions();
 
 	StartTimers(World);
@@ -157,55 +158,39 @@ void UHyper3DObjectsSubsystem::UpdateFromSplatDimensions()
 	{
 		if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
 		{
-			FVector2D SplatDimensions = SplatSubsystem->GetSplatDimensions();
-			FVector SplatCenter = SplatSubsystem->GetSplatCenter();
+			// Check if splat bounds are actually available (not just default values)
+			FBox CurrentSplatBounds = SplatSubsystem->GetSplatBounds();
+			FVector BoxSizeVector = CurrentSplatBounds.GetSize();
 			
-			// Always set BoxSize from splat dimensions
-			// Use the larger of X or Y as the box size (square box)
+			// If bounds are not available, GetSplatBounds returns an empty box (ForceInit)
+			// Check if the box has any meaningful size
+			if (BoxSizeVector.Size() < 1.0f)
+			{
+				// Splat bounds not available yet - will be updated when OnSplatBoundsUpdated is called
+				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Splat bounds not available yet, waiting for splat to load..."));
+				return;
+			}
+
+			FVector2D SplatDimensions = SplatSubsystem->GetSplatDimensions();
+			
+			// Use splat dimensions only to constrain the box size
+			// Default box size is 200x200, but shrink if splat is smaller
+			const float DesiredBoxSize = 200.0f;
 			float SplatBoxSize = FMath::Max(SplatDimensions.X, SplatDimensions.Y);
+			
 			if (SplatBoxSize > 0.0f)
 			{
-				BoxSize = SplatBoxSize;
-				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Set BoxSize to splat dimensions: %.1f (from splat X=%.1f, Y=%.1f)"), 
-					BoxSize, SplatDimensions.X, SplatDimensions.Y);
+				// Use the smaller of desired size or splat size
+				BoxSize = FMath::Min(DesiredBoxSize, SplatBoxSize);
+				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Box size: %.1f (desired: %.1f, splat: %.1f x %.1f)"), 
+					BoxSize, DesiredBoxSize, SplatDimensions.X, SplatDimensions.Y);
 			}
 			else
 			{
+				// Splat dimensions invalid, use default
+				BoxSize = DesiredBoxSize;
 				UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Splat dimensions invalid, using default BoxSize: %.1f"), BoxSize);
 			}
-			
-			// ReferenceLocation defaults to origin (FVector::ZeroVector) unless manually set via SetReferenceLocation()
-			// Dense point filtering uses SplatCenter for calculations, but ReferenceLocation remains at origin by default
-			
-			// Get dense point regions for object placement (0.15 = sphere size threshold for dense regions)
-			TArray<FVector> AllDenseRegions = SplatSubsystem->GetDensePointRegions(0.15f);
-			
-			// Filter dense points to only those near the ReferenceLocation (within 8% of splat size horizontally)
-			// This keeps objects extremely close to ReferenceLocation
-			// Objects can be placed at any Z coordinate, but must be close to ReferenceLocation horizontally
-			float CenterRadius = SplatBoxSize * 0.08f; // 8% of splat size (reduced to keep objects extremely close to ReferenceLocation)
-			
-			DensePointRegions.Empty();
-			DensePointRegions.Reserve(AllDenseRegions.Num());
-			
-			// Filter dense points by horizontal distance from ReferenceLocation only (no Z filtering)
-			for (const FVector& DensePoint : AllDenseRegions)
-			{
-				FVector OffsetFromReference = DensePoint - ReferenceLocation;
-				// Only check horizontal distance (X, Y), ignore Z
-				float HorizontalDistance = FVector2D(OffsetFromReference.X, OffsetFromReference.Y).Size();
-				
-				if (HorizontalDistance <= CenterRadius)
-				{
-					// Include this point regardless of Z coordinate
-					DensePointRegions.Add(DensePoint);
-				}
-			}
-			
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Filtered to %d dense points near ReferenceLocation (horizontal radius: %.1f, Z unrestricted)"), 
-				DensePointRegions.Num(), CenterRadius);
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found %d dense point regions near ReferenceLocation (out of %d total)"), 
-				DensePointRegions.Num(), AllDenseRegions.Num());
 			
 			// Update object layout if objects are already spawned
 			if (bImportsActive)
@@ -246,19 +231,6 @@ void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLo
 	// Update object positions immediately if objects are already spawned
 	if (bImportsActive)
 	{
-		UpdateObjectMotion();
-	}
-}
-
-void UHyper3DObjectsSubsystem::SetBobAmplitudeVariance(float InBobAmplitudeVariance)
-{
-	BobAmplitudeVariance = FMath::Max(0.0f, InBobAmplitudeVariance); // Ensure non-negative
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Bob amplitude variance set to: %.2f"), BobAmplitudeVariance);
-	
-	// Update object layout immediately if objects are already spawned
-	if (bImportsActive)
-	{
-		UpdateObjectLayout();
 		UpdateObjectMotion();
 	}
 }
@@ -450,13 +422,15 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 	}
 
-	// Count total instances across all OBJ files
+	// Count total instances across all OBJ files and track per-OBJ counts
 	int32 CurrentTotalInstances = 0;
+	ObjInstanceCounts.Empty();
 	for (const FObjectInstance& Instance : ObjectInstances)
 	{
 		if (Instance.Actor.IsValid())
 		{
 			CurrentTotalInstances++;
+			ObjInstanceCounts.FindOrAdd(Instance.SourceObjPath)++;
 		}
 	}
 	
@@ -514,29 +488,51 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 			}
 		}
 		
-		// Spawn instances randomly across OBJ files
+		// Spawn instances with weighted random selection favoring OBJ files with fewer instances
 		const int32 MaxSpawnPerFrame = 10; // Spawn up to 10 per refresh cycle
 		int32 SpawnCount = FMath::Min(InstancesToSpawn, MaxSpawnPerFrame);
 		
 		FRandomStream RandomStream(FDateTime::Now().GetTicks());
 		for (int32 i = 0; i < SpawnCount; ++i)
 		{
-			// Randomly pick an OBJ file
-			int32 RandomObjIndex = RandomStream.RandRange(0, DesiredPathList.Num() - 1);
-			const FString& SelectedObjPath = DesiredPathList[RandomObjIndex];
-			
-			FCachedMeshData* CachedData = MeshDataCache.Find(SelectedObjPath);
-			if (CachedData && CachedData->bIsValid)
+			// Build weighted list: OBJ files with fewer instances get higher weight
+			TArray<FString> WeightedObjList;
+			for (const FString& ObjPath : DesiredPathList)
 			{
-				if (!SpawnObjectFromCachedData(SelectedObjPath, *CachedData))
+				int32 CurrentCount = ObjInstanceCounts.FindRef(ObjPath);
+				// Weight = inverse of (count + 1), so files with 0 instances get weight 1, 1 instance gets 0.5, etc.
+				// Multiply by 10 to get integer weights (0 instances = 10, 1 instance = 5, 2 instances = 3, etc.)
+				int32 Weight = FMath::Max(1, 10 / (CurrentCount + 1));
+				for (int32 w = 0; w < Weight; ++w)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
+					WeightedObjList.Add(ObjPath);
 				}
+			}
+			
+			if (WeightedObjList.Num() > 0)
+			{
+				// Pick randomly from weighted list
+				int32 RandomIndex = RandomStream.RandRange(0, WeightedObjList.Num() - 1);
+				const FString& SelectedObjPath = WeightedObjList[RandomIndex];
 				
-				// Yield to game thread every few spawns to prevent freezing
-				if ((i + 1) % 5 == 0)
+				FCachedMeshData* CachedData = MeshDataCache.Find(SelectedObjPath);
+				if (CachedData && CachedData->bIsValid)
 				{
-					FPlatformProcess::Sleep(0.001f); // 1ms sleep to yield
+					if (SpawnObjectFromCachedData(SelectedObjPath, *CachedData))
+					{
+						// Update count for this OBJ file
+						ObjInstanceCounts.FindOrAdd(SelectedObjPath)++;
+					}
+					else
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
+					}
+					
+					// Yield to game thread every few spawns to prevent freezing
+					if ((i + 1) % 5 == 0)
+					{
+						FPlatformProcess::Sleep(0.001f); // 1ms sleep to yield
+					}
 				}
 			}
 		}
@@ -568,61 +564,68 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 	// Use current time as seed so layout changes when parameters change
 	FRandomStream Stream(FDateTime::Now().GetTicks());
 	
-	// Use dense regions if available, otherwise fall back to box placement
-	if (DensePointRegions.Num() > 0)
+	// Place objects in a random box around ReferenceLocation
+	// Box size is 200x200 by default, but constrained by splat dimensions if smaller
+	const float HalfBoxSize = BoxSize * 0.5f; // -HalfBoxSize to +HalfBoxSize
+	
+	// Track placed positions to ensure minimum spacing
+	TArray<FVector2D> PlacedPositions;
+	PlacedPositions.Reserve(Count);
+	
+	for (int32 Index = 0; Index < Count; ++Index)
 	{
-		// Place objects at random dense point locations with minimal jitter
-		// Objects can be at any Z coordinate from the dense points
-		// Very small random offset for slight variation while keeping objects extremely close to ReferenceLocation
-		const float JitterRadius = BoxSize * 0.01f; // 1% jitter for slight randomness (reduced to keep objects extremely close)
+		FObjectInstance& Instance = ObjectInstances[Index];
 		
-		for (int32 Index = 0; Index < Count; ++Index)
-		{
-			FObjectInstance& Instance = ObjectInstances[Index];
-			
-			// Pick a random dense point (these are already filtered to be near ReferenceLocation horizontally)
-			int32 RandomDenseIndex = Stream.RandRange(0, DensePointRegions.Num() - 1);
-			FVector DensePoint = DensePointRegions[RandomDenseIndex];
-			
-			// Convert to local coordinates relative to ReferenceLocation
-			FVector LocalPos = DensePoint - ReferenceLocation;
-			
-			// Add random jitter to X and Y for more random distribution in the middle
-			float JitterX = Stream.FRandRange(-JitterRadius, JitterRadius);
-			float JitterY = Stream.FRandRange(-JitterRadius, JitterRadius);
-			
-			Instance.BaseX = LocalPos.X + JitterX;
-			Instance.BaseY = LocalPos.Y + JitterY;
-			// Use the Z coordinate from the dense point (allows objects at any Z)
-			Instance.BaseHeight = LocalPos.Z;
-			
-			// More dramatic bobbing with varied frequencies
-			Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
-			Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
-		}
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in dense regions near ReferenceLocation with random jitter (Z unrestricted)"), Count);
-	}
-	else
-	{
-		// Fallback to box placement if no dense regions available
-		// Use a very small box (5% of splat size) centered at ReferenceLocation to keep objects extremely close
-		const float CenterBoxSize = BoxSize * 0.05f; // 5% of splat size for center region (reduced to keep objects extremely close)
-		const float HalfBoxSize = CenterBoxSize * 0.5f; // -HalfBoxSize to +HalfBoxSize
+		// Try to find a position that's far enough from other objects
+		FVector2D NewPosition;
+		int32 MaxAttempts = 50; // Limit attempts to avoid infinite loops
+		bool bFoundValidPosition = false;
 		
-		for (int32 Index = 0; Index < Count; ++Index)
+		for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 		{
-			FObjectInstance& Instance = ObjectInstances[Index];
-			// Randomly place objects in a smaller box centered at origin (near center of splat)
-			Instance.BaseX = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
-			Instance.BaseY = Stream.FRandRange(-HalfBoxSize, HalfBoxSize);
-			// More dramatic bobbing with varied frequencies
-			Instance.BobFrequency = BaseBobFrequency + Stream.FRandRange(-BobFrequencyVariance, BobFrequencyVariance);
-			Instance.BobAmplitude = BaseBobAmplitude + Stream.FRandRange(-BobAmplitudeVariance, BobAmplitudeVariance);
-			// Random height variation for each object
-			Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+			// Try a random position
+			NewPosition = FVector2D(
+				Stream.FRandRange(-HalfBoxSize, HalfBoxSize),
+				Stream.FRandRange(-HalfBoxSize, HalfBoxSize)
+			);
+			
+			// Check if this position is far enough from all existing positions
+			bool bTooClose = false;
+			for (const FVector2D& ExistingPos : PlacedPositions)
+			{
+				float Distance = (NewPosition - ExistingPos).Size();
+				if (Distance < MinSpacingDistance)
+				{
+					bTooClose = true;
+					break;
+				}
+			}
+			
+			if (!bTooClose)
+			{
+				bFoundValidPosition = true;
+				break;
+			}
 		}
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in center box (no dense regions available, box size: %.1f)"), Count, CenterBoxSize);
+		
+		// If we couldn't find a valid position after max attempts, use the last tried position anyway
+		// This prevents objects from being placed too close, but ensures all objects get placed
+		Instance.BaseX = NewPosition.X;
+		Instance.BaseY = NewPosition.Y;
+		PlacedPositions.Add(NewPosition);
+		
+		// Random height variation for each object
+		Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+		// Random rotation: only randomize Yaw (Z-axis rotation), keep Pitch and Roll at base values
+		Instance.RandomRotation = FRotator(
+			BaseMeshRotation.Pitch,                                      // Keep base pitch
+			BaseMeshRotation.Yaw + Stream.FRandRange(0.0f, 360.0f),     // Full 360 degree random yaw (Z-axis)
+			BaseMeshRotation.Roll                                        // Keep base roll
+		);
 	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in %.1fx%.1f box centered at ReferenceLocation"), 
+		Count, BoxSize, BoxSize);
 }
 
 void UHyper3DObjectsSubsystem::UpdateObjectMotion()
@@ -651,15 +654,15 @@ void UHyper3DObjectsSubsystem::UpdateObjectMotion()
 		// Use random positions from box (already set in UpdateObjectLayout)
 		const float X = Instance.BaseX;
 		const float Y = Instance.BaseY;
-		// Bob up and down (Z axis) with varied amplitude
-		const float Height = Instance.BaseHeight + FMath::Sin(Time * PI * Instance.BobFrequency * 2.0f) * Instance.BobAmplitude;
+		// Use base height directly (no bouncing)
+		const float Height = Instance.BaseHeight;
 
 		// Position relative to reference location
 		const FVector Location = ReferenceLocation + FVector(X, Y, Height);
 		Actor->SetActorLocation(Location);
 
-		// Keep base rotation
-		Actor->SetActorRotation(BaseMeshRotation);
+		// Apply random rotation for this object
+		Actor->SetActorRotation(Instance.RandomRotation);
 	}
 }
 
@@ -726,6 +729,7 @@ bool UHyper3DObjectsSubsystem::SpawnObjectGroupFromOBJ(const FString& ObjPath)
 	FObjectInstance Instance;
 	Instance.SourceObjPath = ObjPath;
 	Instance.Actor = ObjectActor;
+	Instance.RandomRotation = BaseMeshRotation; // Will be randomized in UpdateObjectLayout
 	Instance.DiffuseTexture = TextureSet.Diffuse;
 	Instance.MetallicTexture = TextureSet.Metallic;
 	Instance.NormalTexture = TextureSet.Normal;
@@ -789,6 +793,7 @@ bool UHyper3DObjectsSubsystem::SpawnObjectFromCachedData(const FString& ObjPath,
 	FObjectInstance Instance;
 	Instance.SourceObjPath = ObjPath;
 	Instance.Actor = ObjectActor;
+	Instance.RandomRotation = BaseMeshRotation; // Will be randomized in UpdateObjectLayout
 	Instance.DiffuseTexture = CachedData.TextureSet.Diffuse;
 	Instance.MetallicTexture = CachedData.TextureSet.Metallic;
 	Instance.NormalTexture = CachedData.TextureSet.Normal;

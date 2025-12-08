@@ -5,7 +5,6 @@
 #include "Components/StaticMeshComponent.h"
 #include "ComfyStreamComponent.h"
 #include "ComfyFrameBuffer.h"
-#include "ComfyReconstruction.h"
 #include "ComfyStreamActor.generated.h"
 
 //receives 3 texture maps from ComfyUI and applies to to a material 
@@ -69,11 +68,13 @@ public:
 private:
 	//External helper functions 
 	UPROPERTY() UComfyFrameBuffer*    FrameBuffer = nullptr;
-	UPROPERTY() UComfyReconstruction* Reconstruction = nullptr;
 	UPROPERTY() UMaterialInstanceDynamic* DynMat = nullptr;
 
 	//once buffer completes, last frame 
 	FComfyFrame LatestFrame;
+
+	//Last frame that was actually applied to an actor (to prevent duplicate updates)
+	FComfyFrame LastAppliedFrame;
 
 	//sequence index for textures 
 	int32 SeqIndex = 0;
@@ -104,11 +105,9 @@ private:
 	//When FrameBuffer emits a complete triplet
 	UFUNCTION() void HandleFullFrame(const FComfyFrame& Frame);
 
-	//Place DisplayMesh based on depth
-	void UpdatePlacementFromDepth(const FComfyFrame& Frame);
 	//Apply textures to the material
 	void ApplyTexturesToMaterial(const FComfyFrame& Frame);
-	//Spawn actor at world position from depth
+	//Spawn actor at specified world position
 	void SpawnTextureActor(const FComfyFrame& Frame, const FVector& WorldPosition);
 	
 	//Find existing actor at location or spawn new

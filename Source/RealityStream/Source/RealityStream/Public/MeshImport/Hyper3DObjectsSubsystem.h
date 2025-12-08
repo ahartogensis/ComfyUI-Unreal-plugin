@@ -12,7 +12,7 @@ class UMaterial;
 
 /**
  * Imports all OBJ meshes (with optional textures) found in the plugin's MeshImport folder
- * and animates them as floating objects with bobbing motion.
+ * and places them as static objects.
  */
 UCLASS(BlueprintType)
 class REALITYSTREAM_API UHyper3DObjectsSubsystem : public UGameInstanceSubsystem
@@ -33,10 +33,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void SetReferenceLocation(const FVector& ReferenceLocation);
 
-	// Set the height variance of the bobbing (variance in bobbing amplitude)
-	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
-	void SetBobAmplitudeVariance(float InBobAmplitudeVariance);
-
 	// Set the total number of instances to spawn across all object meshes (randomly distributed, default: 20)
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void SetTotalInstances(int32 InTotalInstances);
@@ -55,9 +51,8 @@ private:
 		TWeakObjectPtr<AActor> Actor;
 		float BaseX = 0.f;  // Random X position in box
 		float BaseY = 0.f;  // Random Y position in box
-		float BobFrequency = 0.5f;  // Hz
-		float BobAmplitude = 60.f;  // centimeters
 		float BaseHeight = 200.f;   // centimeters
+		FRotator RandomRotation;  // Random rotation for this object
 		TWeakObjectPtr<UTexture2D> DiffuseTexture;
 		TWeakObjectPtr<UTexture2D> MetallicTexture;
 		TWeakObjectPtr<UTexture2D> NormalTexture;
@@ -158,23 +153,20 @@ private:
 	// Cache for loaded OBJ mesh data (keyed by OBJ file path)
 	TMap<FString, FCachedMeshData> MeshDataCache;
 
+	// Track how many instances of each OBJ file have been spawned (for better distribution)
+	TMap<FString, int32> ObjInstanceCounts;
+
 	// Cached settings
-	float BoxSize = 200.0f;  // Size of the box volume for object placement (default: 200x200)
+	float BoxSize = 200.0f;  // Size of the box volume for object placement (default: 200x200, constrained by splat dimensions)
 	int32 TotalInstances = 20;  // Total number of instances to spawn across all OBJ files (randomly distributed, default: 20)
 	float BaseHeight = 0.f;  // Base height for objects
 	float HeightVariance = 100.f;  // Height variance for different heights
-	float BaseBobFrequency = 0.35f; // Hz - bobbing frequency
-	float BobFrequencyVariance = 0.25f;
-	float BaseBobAmplitude = 10.f; // cm - minimal bobbing amplitude
-	float BobAmplitudeVariance = 5.f; // Minimal variance
-	float ImportScaleMultiplier = 15.0f; // Smaller size for better scene matching
+	float MinSpacingDistance = 50.0f;  // Minimum distance between objects (in world units) to ensure spacing
+	float ImportScaleMultiplier = 50.0f; 
 	FRotator BaseMeshRotation = FRotator(0.f, 0.f, -90.f);
 
 	// Reference location for object positioning (defaults to origin)
 	FVector ReferenceLocation = FVector::ZeroVector;
-	
-	// Dense point regions from splat (for placing objects only in dense areas)
-	TArray<FVector> DensePointRegions;
 
 	bool bImportsActive = false;
 };

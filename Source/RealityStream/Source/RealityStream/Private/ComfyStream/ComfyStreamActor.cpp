@@ -1,5 +1,4 @@
 #include "ComfyStream/ComfyStreamActor.h"
-#include "ComfyStream/ComfyReconstruction.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
@@ -28,7 +27,6 @@ void AComfyStreamActor::BeginPlay()
 
 	//Create external helpers for pairing and placement 
 	FrameBuffer   = NewObject<UComfyFrameBuffer>(this);
-	Reconstruction = NewObject<UComfyReconstruction>(this);
 
 	//Create material
 	if (BaseMaterial)
@@ -168,8 +166,36 @@ void AComfyStreamActor::HandleStreamError(const FString& Error)
 void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 {
 	LatestFrame = Frame;
-	ApplyTexturesToMaterial(Frame);
-	UpdatePlacementFromDepth(Frame);
+	
+	// Check if this is actually a new frame (textures are different from last applied frame)
+	bool bIsNewFrame = false;
+	if (!LastAppliedFrame.IsComplete())
+	{
+		// First frame - always apply
+		bIsNewFrame = true;
+	}
+	else
+	{
+		// Compare textures to see if this is a new frame
+		if (Frame.RGB != LastAppliedFrame.RGB ||
+			Frame.Depth != LastAppliedFrame.Depth ||
+			Frame.Mask != LastAppliedFrame.Mask)
+		{
+			bIsNewFrame = true;
+		}
+	}
+	
+	// Only update actor if this is a new frame
+	if (bIsNewFrame)
+	{
+		ApplyTexturesToMaterial(Frame);
+		// Removed depth-based placement - using fixed position instead
+		FVector FixedPosition = GetActorLocation();
+		SpawnTextureActor(Frame, FixedPosition);
+		
+		// Update last applied frame
+		LastAppliedFrame = Frame;
+	}
 }
 
 void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
@@ -186,59 +212,6 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 	DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
 	DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
 	DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
-}
-
-void AComfyStreamActor::UpdatePlacementFromDepth(const FComfyFrame& Frame)
-{
-	//1) average depth in masked area
-	float d01 = 0.5f;
-	UTexture2D* DepthTex = Frame.Depth;
-	UTexture2D* MaskTex = Frame.Mask;
-	
-	Reconstruction->AverageNormalizedDepth(DepthTex, MaskTex, d01, 8);
-
-	//2) map to world-units 
-	//for DepthAnything: d01~1.0 near, ~0.0 far
-	const float Far = Reconstruction->DepthScaleUnits;
-	const float Near = Far * 0.05f; //avoid zero depth 
-	const float Zdist = FMath::Lerp(Far, Near, FMath::Clamp(d01, 0.0f, 1.0f));
-
-	//3) estimate intrinsics from RGB size or depth based on what is available
-	UTexture2D* SizeTex = Frame.RGB ? Frame.RGB : Frame.Depth;
-	if (!SizeTex) return;
-	
-	const int32 W = SizeTex->GetSizeX();
-	const int32 H = SizeTex->GetSizeY();
-
-	float fx, fy, cx, cy;
-	Reconstruction->EstimateIntrinsics(W, H, fx, fy, cx, cy);
-
-	//4) pick a representative pixel (image center)
-	const int32 Px = (W - 1) / 2;
-	const int32 Py = (H - 1) / 2;
-
-	//5) back-project to world-relative vector
-	const FVector Local = Reconstruction->DepthToWorld(Px, Py, Zdist, W, H, fx, fy, cx, cy);
-	const FVector WorldPosition = GetActorLocation() + Local;
-
-	// Use a single actor at a fixed position (relative to this actor) to prevent drift
-	// If we have existing actors, use the first one's position as anchor, otherwise use calculated position
-	FVector TargetPosition = WorldPosition;
-	if (ActorData.Num() > 0 && ActorData[0].Actor && IsValid(ActorData[0].Actor))
-	{
-		// Use existing actor's position as anchor to prevent drift
-		TargetPosition = ActorData[0].Actor->GetActorLocation();
-		// Only update if there's a significant change (more than threshold)
-		float Distance = FVector::Dist(TargetPosition, WorldPosition);
-		if (Distance > LocationThreshold * 0.5f)
-		{
-			// Smoothly lerp to new position
-			TargetPosition = FMath::Lerp(TargetPosition, WorldPosition, 0.05f);
-		}
-	}
-
-	//Spawn/update actor at target position
-	SpawnTextureActor(Frame, TargetPosition);
 }
 
 void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVector& WorldPosition)
@@ -275,40 +248,107 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 	}
 
 	//Update textures with lerp if material exists
+	// Always update textures - the frame comparison in HandleFullFrame ensures we only get new frames
 	if (ActorDataPtr->Material)
 	{
-		//Set new textures - update directly (smooth transition handled by material if it supports it)
-		ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
-		ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
-		ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
-
-		//If material supports lerp alpha parameter, enable lerping
-		float LerpParam = 0.0f;
-		if (ActorDataPtr->Material->GetScalarParameterValue(TEXT("LerpAlpha"), LerpParam))
+		// Check if textures are different from what's currently set (for logging)
+		UTexture* CurrentRGB = nullptr;
+		UTexture* CurrentDepth = nullptr;
+		UTexture* CurrentMask = nullptr;
+		bool bHasRGB = ActorDataPtr->Material->GetTextureParameterValue(TEXT("RGB_Map"), CurrentRGB);
+		bool bHasDepth = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Depth_Map"), CurrentDepth);
+		bool bHasMask = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Mask_Map"), CurrentMask);
+		
+		// If any texture is not set or different, update all textures
+		// This ensures textures are always set, even if GetTextureParameterValue fails
+		bool bTexturesChanged = !bHasRGB || !bHasDepth || !bHasMask || 
+		                        (CurrentRGB != Frame.RGB || CurrentDepth != Frame.Depth || CurrentMask != Frame.Mask);
+		
+		if (bTexturesChanged)
 		{
-			ActorDataPtr->LerpAlpha = 0.0f;
-			ActorDataPtr->bIsLerping = true;
-			//Set new textures as target for lerp
-			ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
-			ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
-			ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
+			// Ensure all textures are valid before setting
+			if (Frame.RGB && Frame.Depth && Frame.Mask)
+			{
+				//Set new textures - update directly (smooth transition handled by material if it supports it)
+				ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
+				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
+				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
+
+				//If material supports lerp alpha parameter, enable lerping
+				float LerpParam = 0.0f;
+				if (ActorDataPtr->Material->GetScalarParameterValue(TEXT("LerpAlpha"), LerpParam))
+				{
+					ActorDataPtr->LerpAlpha = 0.0f;
+					ActorDataPtr->bIsLerping = true;
+					//Set new textures as target for lerp
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
+				}
+				
+				UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Updated textures on actor: RGB=%s, Depth=%s, Mask=%s"), 
+					Frame.RGB ? *Frame.RGB->GetName() : TEXT("NULL"),
+					Frame.Depth ? *Frame.Depth->GetName() : TEXT("NULL"),
+					Frame.Mask ? *Frame.Mask->GetName() : TEXT("NULL"));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Frame has null textures - RGB=%s, Depth=%s, Mask=%s"), 
+					Frame.RGB ? TEXT("valid") : TEXT("NULL"),
+					Frame.Depth ? TEXT("valid") : TEXT("NULL"),
+					Frame.Mask ? TEXT("valid") : TEXT("NULL"));
+			}
+		}
+		else
+		{
+			// Textures haven't changed - don't update actor
+			UE_LOG(LogTemp, Verbose, TEXT("[ComfyStreamActor] Textures unchanged, skipping actor update"));
 		}
 	}
 	else
 	{
-			//First time - apply textures directly
-			UStaticMeshComponent* MeshComp = Actor->FindComponentByClass<UStaticMeshComponent>();
-			if (MeshComp && BaseMaterial)
+		//First time - create material and apply textures directly
+		UStaticMeshComponent* MeshComp = Actor->FindComponentByClass<UStaticMeshComponent>();
+		if (MeshComp && BaseMaterial)
+		{
+			ActorDataPtr->Material = UMaterialInstanceDynamic::Create(BaseMaterial, Actor);
+			if (ActorDataPtr->Material)
 			{
-				ActorDataPtr->Material = UMaterialInstanceDynamic::Create(BaseMaterial, Actor);
-				ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
-				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
-				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
-				ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
-				MeshComp->SetMaterial(0, ActorDataPtr->Material);
-				ActorDataPtr->LerpAlpha = 1.0f;
-				ActorDataPtr->OpacityAlpha = 1.0f;
+				// Ensure all textures are valid before setting
+				if (Frame.RGB && Frame.Depth && Frame.Mask)
+				{
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
+					ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
+					MeshComp->SetMaterial(0, ActorDataPtr->Material);
+					ActorDataPtr->LerpAlpha = 1.0f;
+					ActorDataPtr->OpacityAlpha = 1.0f;
+					
+					UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Created material and set textures on new actor: RGB=%s, Depth=%s, Mask=%s"), 
+						Frame.RGB ? *Frame.RGB->GetName() : TEXT("NULL"),
+						Frame.Depth ? *Frame.Depth->GetName() : TEXT("NULL"),
+						Frame.Mask ? *Frame.Mask->GetName() : TEXT("NULL"));
+				}
+				else
+				{
+					UE_LOG(LogTemp, Error, TEXT("[ComfyStreamActor] Failed to set textures on new actor - Frame has null textures: RGB=%s, Depth=%s, Mask=%s"), 
+						Frame.RGB ? TEXT("valid") : TEXT("NULL"),
+						Frame.Depth ? TEXT("valid") : TEXT("NULL"),
+						Frame.Mask ? TEXT("valid") : TEXT("NULL"));
+				}
 			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("[ComfyStreamActor] Failed to create material instance dynamic"));
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Cannot create material - MeshComp=%s, BaseMaterial=%s"), 
+				MeshComp ? TEXT("valid") : TEXT("NULL"),
+				BaseMaterial ? TEXT("valid") : TEXT("NULL"));
+		}
 	}
 
 	//Reset destroy timer and opacity

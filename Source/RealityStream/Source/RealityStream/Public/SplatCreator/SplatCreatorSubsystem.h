@@ -81,7 +81,7 @@ private:
 	void CycleToNextPLY();
 	void LoadPLYFile(const FString& PLYPath);
 	bool ParsePLYFile(const FString& PLYPath, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
-	void FilterByOcclusion(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
+	void SamplePointsUniformly(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
 	void CalculateAdaptiveSphereSizes(const TArray<FVector>& Positions, TArray<float>& OutSphereSizes);
 	void CreatePointCloud(const TArray<FVector>& Positions, const TArray<FColor>& Colors);
 	void UpdateMorph();

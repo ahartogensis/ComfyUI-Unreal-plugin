@@ -165,10 +165,10 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 			*MinBounds.ToString(), *MaxBounds.ToString());
 	}
 	
-	// Filter by occlusion culling based on player camera position
+	// Uniformly sample points to limit count for performance
 	TArray<FVector> FilteredPositions;
 	TArray<FColor> FilteredColors;
-	FilterByOcclusion(Positions, Colors, FilteredPositions, FilteredColors);
+	SamplePointsUniformly(Positions, Colors, FilteredPositions, FilteredColors);
 	
 	if (FilteredPositions.Num() > 0)
 	{
@@ -425,15 +425,15 @@ bool USplatCreatorSubsystem::ParsePLYFile(const FString& PLYPath, TArray<FVector
 	return OutPositions.Num() > 0;
 }
 
-void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
+void USplatCreatorSubsystem::SamplePointsUniformly(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
 {
 	OutPositions.Empty();
 	OutColors.Empty();
 	
 	if (InPositions.Num() == 0) return;
 	
-	// No culling - keep all points, but limit total count for performance
-	// Use uniform sampling to reduce from 2M to manageable number while maintaining mesh-like appearance
+	// Uniformly sample points to limit total count for performance
+	// Use uniform sampling to reduce from large point counts to manageable number while maintaining mesh-like appearance
 	// Reduced significantly to avoid HISM internal culling issues
 	const int32 MaxPoints = 100000;
 	
@@ -442,7 +442,7 @@ void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPosition
 		// Keep all points if under limit
 		OutPositions = InPositions;
 		OutColors = InColors;
-		UE_LOG(LogTemp, Display, TEXT("[NoCull] Keeping all %d points (under limit)"), InPositions.Num());
+		UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Keeping all %d points (under limit)"), InPositions.Num());
 		return;
 	}
 	
@@ -465,14 +465,14 @@ void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPosition
 		if (i < InColors.Num())
 		{
 			OutColors.Add(InColors[i]);
-	}
-	else
-	{
-				OutColors.Add(FColor::White);
-			}
 		}
-		
-	UE_LOG(LogTemp, Display, TEXT("[NoCull] Uniform sampling: %d -> %d points (step: %d)"), 
+		else
+		{
+			OutColors.Add(FColor::White);
+		}
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Uniform sampling: %d -> %d points (step: %d)"), 
 		InPositions.Num(), OutPositions.Num(), Step);
 }
 
