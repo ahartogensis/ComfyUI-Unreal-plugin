@@ -68,10 +68,10 @@ bool UComfyImageFetcher::IsPolling() const
 // PNG SPLITTER (ROBUST CHUNK-BASED PARSER)
 // ============================================================
 
-// Checks if a PNG has RGB color type (color type 2 or 6) by reading IHDR chunk
-// Returns true if RGB/RGBA, false if grayscale or other
+// Checks if a PNG has RGB color type (color type 2, 3, or 6) by reading IHDR chunk
+// Returns true if RGB/RGBA/Indexed, false if grayscale or other
 // PNG IHDR structure (after 8-byte signature): [len:4][IHDR:4][width:4][height:4][bit_depth:1][color_type:1][compression:1][filter:1][interlace:1][crc:4]
-// Color type: 0=Grayscale, 2=RGB, 3=Indexed, 4=Grayscale+Alpha, 6=RGB+Alpha
+// Color type: 0=Grayscale, 2=RGB, 3=Indexed (palette with color), 4=Grayscale+Alpha, 6=RGB+Alpha
 static bool IsPngRGB(const TArray<uint8>& PngData)
 {
 	const int32 N = PngData.Num();
@@ -91,10 +91,24 @@ static bool IsPngRGB(const TArray<uint8>& PngData)
 	// Color type is at offset 25 (8 sig + 4 len + 4 type + 4 width + 4 height + 1 bit_depth = 25)
 	const uint8 ColorType = PngData[25];
 	
-	// Color type 2 = RGB, 6 = RGBA (both are RGB images)
-	bool bIsRGB = (ColorType == 2 || ColorType == 6);
+	// Color type 2 = RGB, 3 = Indexed (palette with colors), 6 = RGBA (all are color images)
+	// Include indexed color (type 3) because colored canny edge images are often saved as indexed PNGs
+	bool bIsRGB = (ColorType == 2 || ColorType == 3 || ColorType == 6);
 	
 	return bIsRGB;
+}
+
+// Checks if an RGB PNG actually contains grayscale-like content (likely depth/mask)
+// by sampling pixel data to see if R=G=B (grayscale) or if there's actual color variation
+// Returns true if the image appears to be grayscale content in an RGB container
+static bool IsRGBPngActuallyGrayscale(const TArray<uint8>& PngData)
+{
+	// Heuristic: very small files are likely masks
+	// Medium to large files could be either RGB or depth
+	// Since we can't easily distinguish RGB from depth by size alone when both are RGB type,
+	// we'll use a conservative threshold - only mark very small files as grayscale
+	const int32 Size = PngData.Num();
+	return Size < 5000; // Only very small files (< 5KB) are likely masks
 }
 
 // Parses a single PNG starting at StartIdx by walking chunks properly.
@@ -290,6 +304,7 @@ void UComfyImageFetcher::OnWebSocketMessage(const void* Data, SIZE_T Size, SIZE_
 		if (BytesRemaining > 0)
 		{
 			bReceivingChunks = true;
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message chunk received: %llu bytes, %llu remaining"), Size, BytesRemaining);
 			return;
 		}
 
@@ -343,7 +358,10 @@ static bool IsJsonOrText(const TArray<uint8>& Data, int32 StartOffset = 0)
 
 void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 {
-	if (In.Num() < 4) return;
+	if (In.Num() < 4)
+	{
+		return;
+	}
 
 	// Handle optional 8-byte binary header [1,2] (BE or LE) used by WebViewer
 	int32 Offset = 0;
@@ -453,6 +471,10 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		
 		MessagesSinceLastFrame++;
 		
+		// Log complete message with total accumulated count
+		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes (complete)"), In.Num());
+		UE_LOG(LogTemp, Display, TEXT("Total accumulated: %d"), AccumulatedPngMessages.Num());
+		
 		// Protection: If too many messages without completing a frame, clear accumulator
 		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
 		{
@@ -509,6 +531,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			IsRGB.SetNum(ExpectedPngCount);
 			int32 RGBCount = 0;
 			int32 RGBIndex = INDEX_NONE;
+			bool bUsedColorBasedDetection = false;
 			
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
@@ -518,44 +541,22 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 					RGBCount++;
 					RGBIndex = i;
 				}
-			}
-			
-			// Primary method: Use color type detection if exactly one RGB PNG is found
-			if (RGBCount == 1 && ExpectedPngCount == 3)
-			{
-				AssignedIndices[RGBIndex] = 0;
 				
-				// For the two grayscale PNGs, use size: larger = Depth, smaller = Mask
-				TArray<int32> GrayscaleIndices;
-				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				// Log color type detection for debugging
+				if (AccumulatedPngMessages[i].Num() >= 25)
 				{
-					if (!IsRGB[i])
-					{
-						GrayscaleIndices.Add(i);
-					}
-				}
-				
-				// Sort grayscale by size (smallest to largest)
-				GrayscaleIndices.Sort([this](const int32& A, const int32& B) {
-					return AccumulatedPngMessages[A].Num() < AccumulatedPngMessages[B].Num();
-				});
-				
-				// Assign: smaller = Mask (index 2), larger = Depth (index 1)
-				if (GrayscaleIndices.Num() == 2)
-				{
-					AssignedIndices[GrayscaleIndices[0]] = 2; // Smaller = Mask
-					AssignedIndices[GrayscaleIndices[1]] = 1; // Larger = Depth
-				}
-				else
-				{
-					// Fall through to size-based fallback
-					RGBCount = 0;
+					const uint8 ColorType = AccumulatedPngMessages[i][25];
+					const FString ColorTypeName = 
+						ColorType == 0 ? TEXT("Grayscale") :
+						ColorType == 2 ? TEXT("RGB") :
+						ColorType == 3 ? TEXT("Indexed") :
+						ColorType == 4 ? TEXT("Grayscale+Alpha") :
+						ColorType == 6 ? TEXT("RGBA") :
+						FString::Printf(TEXT("Unknown(%d)"), ColorType);
+					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] PNG %d: ColorType=%d (%s), Size=%d bytes, IsRGB=%s"), 
+						i, ColorType, *ColorTypeName, AccumulatedPngMessages[i].Num(), IsRGB[i] ? TEXT("true") : TEXT("false"));
 				}
 			}
-			
-			// Fallback: Use size-based assignment if color type detection doesn't work
-			if (RGBCount != 1 || ExpectedPngCount != 3)
-			{
 				TArray<int32> SizeOrder;
 				for (int32 i = 0; i < ExpectedPngCount; ++i)
 				{
@@ -565,12 +566,14 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				SizeOrder.Sort([this](const int32& A, const int32& B) {
 					return AccumulatedPngMessages[A].Num() < AccumulatedPngMessages[B].Num();
 				});
-				
+					
 				if (SizeOrder.Num() == 3)
 				{
 					AssignedIndices[SizeOrder[0]] = 2; // Smallest = Mask
 					AssignedIndices[SizeOrder[1]] = 1; // Medium = Depth
 					AssignedIndices[SizeOrder[2]] = 0; // Largest = RGB
+					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Assigned via size: RGB=%d (largest), Depth=%d (medium), Mask=%d (smallest)"), 
+						SizeOrder[2], SizeOrder[1], SizeOrder[0]);
 				}
 				else
 				{
@@ -580,8 +583,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 						AssignedIndices[i] = i;
 					}
 				}
-			}
-			
 			// Validate assignment: Ensure RGB and Depth are assigned to different accumulator indices
 			int32 RGBAccumIdx = INDEX_NONE;
 			int32 DepthAccumIdx = INDEX_NONE;
@@ -611,6 +612,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			}
 			
 			// Second pass: broadcast in correct order (RGB=0, Depth=1, Mask=2)
+			int32 SuccessfullyBroadcast = 0;
 			for (int32 BroadcastIndex = 0; BroadcastIndex < ExpectedPngCount; ++BroadcastIndex)
 			{
 				// Find which accumulator index corresponds to this broadcast index
@@ -630,17 +632,30 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				}
 				
 				// Verify RGB is actually RGB before broadcasting Index 0
+				// But only skip if we're using size-based assignment (not color-type based)
+				// If we already assigned it as RGB via color detection, trust that assignment
 				if (BroadcastIndex == 0)
 				{
 					bool bIsActuallyRGB = IsPngRGB(AccumulatedPngMessages[AccumulatorIndex]);
-					if (!bIsActuallyRGB)
+					if (!bIsActuallyRGB && !bUsedColorBasedDetection)
 					{
+						// Only skip if we didn't detect it as RGB via color type (size-based fallback)
+						UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Skipping RGB broadcast - assigned image is not RGB (using size-based fallback)"));
 						continue;
+					}
+					else if (!bIsActuallyRGB && bUsedColorBasedDetection)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] RGB verification failed but proceeding anyway (was assigned via color detection)"));
 					}
 				}
 				
-				OnTextureReceived.Broadcast(DecodedTextures[AccumulatorIndex]);
+				UTexture2D* Tex = DecodedTextures[AccumulatorIndex];
+				OnTextureReceived.Broadcast(Tex);
+				SuccessfullyBroadcast++;
 			}
+			
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast %d/%d textures"), 
+				SuccessfullyBroadcast, ExpectedPngCount);
 			
 			// Remove processed PNGs from accumulator
 			AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);

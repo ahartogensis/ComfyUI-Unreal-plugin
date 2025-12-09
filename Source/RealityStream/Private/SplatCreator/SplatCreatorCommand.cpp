@@ -3,5 +3,6 @@
 
 void RegisterSplatCreatorMenus()
 {
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] SplaceCreator subsystem can be called by Blueprints now"));
+	// No menu registration needed - functions are Blueprint-callable
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] SplaceCreator subsystem ready for Blueprint use"));
 }

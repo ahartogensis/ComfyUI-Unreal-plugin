@@ -6,6 +6,9 @@
 
 class UHierarchicalInstancedStaticMeshComponent;
 
+// Delegate for when splat bounds are updated
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSplatBoundsUpdated, FBox, NewBounds);
+
 UCLASS(BlueprintType)
 class REALITYSTREAM_API USplatCreatorSubsystem : public UGameInstanceSubsystem
 {
@@ -15,6 +18,7 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
+	// Start the point cloud system - CALL THIS FROM BLUEPRINT to initialize
 	// In Blueprint: Get Splat Creator Subsystem -> Start Point Cloud System
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	void StartPointCloudSystem();
@@ -23,13 +27,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	FVector2D GetSplatDimensions() const;
 
+	// Get the center position of the current splat's bounding box
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
+	FVector GetSplatCenter() const;
+
+	// Get the full bounding box of the current splat
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
+	FBox GetSplatBounds() const;
+
+	// Get dense point regions (points with high density) for object placement
 	// Returns positions of points that are in dense areas (small sphere sizes indicate density)
+	// DensityThreshold: maximum sphere size to consider as dense (default 0.15, where 0.1=dense, 0.3=sparse)
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	TArray<FVector> GetDensePointRegions(float DensityThreshold = 0.15f) const;
 
+	// Event broadcast when splat bounds are updated (useful for other subsystems to react)
+	UPROPERTY(BlueprintAssignable, Category = "SplatCreator")
+	FOnSplatBoundsUpdated OnSplatBoundsUpdated;
+
 private:
 	bool bIsInitialized = false;
-	
 	// PLY file management
 	TArray<FString> PlyFiles;
 	int32 CurrentFileIndex = 0;
@@ -64,7 +81,7 @@ private:
 	void CycleToNextPLY();
 	void LoadPLYFile(const FString& PLYPath);
 	bool ParsePLYFile(const FString& PLYPath, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
-	void FilterByOcclusion(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
+	void SamplePointsUniformly(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors);
 	void CalculateAdaptiveSphereSizes(const TArray<FVector>& Positions, TArray<float>& OutSphereSizes);
 	void CreatePointCloud(const TArray<FVector>& Positions, const TArray<FColor>& Colors);
 	void UpdateMorph();

@@ -16,11 +16,24 @@
 #include "Math/RandomStream.h"
 #include "Math/Box.h"
 
+
+// ============================================================
+// Initialize
+// ============================================================
+
 void USplatCreatorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
     UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem initialized"));
+
+	// Note: StartPointCloudSystem() will be called automatically when world is ready
+	// Or call it manually from Blueprint using "Get Splat Creator Subsystem" -> "Start Point Cloud System"
 }
+
+
+// ============================================================
+// PointCloud
+// ============================================================
 
 void USplatCreatorSubsystem::StartPointCloudSystem()
 {
@@ -83,6 +96,10 @@ void USplatCreatorSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
+// ============================================================
+// FIND PLYs
+// ============================================================
+
 FString USplatCreatorSubsystem::GetSplatCreatorFolder() const
 {
 	FString PluginDir = FPaths::ProjectPluginsDir() / TEXT("RealityStream");
@@ -112,7 +129,17 @@ void USplatCreatorSubsystem::ScanForPLYFiles()
 	PlyFiles.Sort();
 	
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files in %s"), PlyFiles.Num(), *AbsolutePath);
+	
+	// Log file names for debugging
+	for (const FString& File : PlyFiles)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator]   - %s"), *File);
+	}
 }
+
+// ============================================================
+// CYCLE SPLATS
+// ============================================================
 
 void USplatCreatorSubsystem::CycleToNextPLY()
 {
@@ -128,6 +155,10 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycling to PLY: %s"), *PlyFiles[CurrentFileIndex]);
 	LoadPLYFile(PLYPath);
 }
+
+// ============================================================
+// READ PLY FILES
+// ============================================================
 
 void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 {
@@ -156,10 +187,10 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 			*MinBounds.ToString(), *MaxBounds.ToString());
 	}
 	
-	// Filter by occlusion culling based on player camera position
+	// Uniformly sample points to limit count for performance
 	TArray<FVector> FilteredPositions;
 	TArray<FColor> FilteredColors;
-	FilterByOcclusion(Positions, Colors, FilteredPositions, FilteredColors);
+	SamplePointsUniformly(Positions, Colors, FilteredPositions, FilteredColors);
 	
 	if (FilteredPositions.Num() > 0)
 	{
@@ -170,6 +201,14 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
         else
         {
 		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Occlusion culling removed all points, using original"));
+	}
+	
+	// Limit to 500k points
+	if (Positions.Num() > 500000)
+	{
+		Positions.SetNum(500000);
+		Colors.SetNum(500000);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Limited to 500k points"));
 	}
 	
 	// Create or morph point cloud
@@ -194,14 +233,14 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 		// Scale positions for display (PLY coordinates are typically small)
 		NewPositions.Empty();
 		NewPositions.Reserve(Positions.Num());
-		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f); // Move down by 100 units
+		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f); // Move down by 100 units (moved up from -200)
 		for (const FVector& Pos : Positions)
 		{
 			NewPositions.Add(Pos * 125.0f + DownOffset); // Scale by 125x and apply offset
 		}
 		NewColors = Colors;
 		
-		// Calculate adaptive sphere sizes for new positions
+		// Calculate adaptive sphere sizes for new positions (already scaled)
 		CalculateAdaptiveSphereSizes(NewPositions, SphereSizes);
 		
 		MorphProgress = 0.0f;
@@ -305,7 +344,7 @@ bool USplatCreatorSubsystem::ParsePLYFile(const FString& PLYPath, TArray<FVector
 		int32 Fdc1Idx = PropertyNames.IndexOfByKey(TEXT("f_dc_1"));
 		int32 Fdc2Idx = PropertyNames.IndexOfByKey(TEXT("f_dc_2"));
 		
-		// Calculate vertex size
+		// Calculate vertex size (simplified - assume all floats)
 		int32 VertexSize = PropertyNames.Num() * 4;
 		
 		for (int32 i = 0; i < VertexCount && DataOffset + VertexSize <= FileData.Num() - HeaderEndOffset; i++)
@@ -325,7 +364,7 @@ bool USplatCreatorSubsystem::ParsePLYFile(const FString& PLYPath, TArray<FVector
 				float SH1 = *reinterpret_cast<const float*>(DataPtr + DataOffset + Fdc1Idx * 4);
 				float SH2 = *reinterpret_cast<const float*>(DataPtr + DataOffset + Fdc2Idx * 4);
 				
-				// Spherical harmonics to RGB conversion
+				// Spherical harmonics to RGB conversion (simplified - using DC component)
 				// SH coefficients are typically in range, convert to [0, 1] then to [0, 255]
 				// Apply sigmoid activation: 0.5 + 0.28209479177387814 * SH (standard SH normalization)
 				float Rf = FMath::Clamp(0.5f + 0.28209479177387814f * SH0, 0.0f, 1.0f);
@@ -408,13 +447,20 @@ bool USplatCreatorSubsystem::ParsePLYFile(const FString& PLYPath, TArray<FVector
 	return OutPositions.Num() > 0;
 }
 
-void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
+
+// ============================================================
+// DOWNSCALE POINTS
+// ============================================================
+
+void USplatCreatorSubsystem::SamplePointsUniformly(const TArray<FVector>& InPositions, const TArray<FColor>& InColors, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
 {
 	OutPositions.Empty();
 	OutColors.Empty();
 	
 	if (InPositions.Num() == 0) return;
 	
+	// Uniformly sample points to limit total count for performance
+	// Use uniform sampling to reduce from large point counts to manageable number while maintaining mesh-like appearance
 	// Reduced significantly to avoid HISM internal culling issues
 	const int32 MaxPoints = 100000;
 	
@@ -423,7 +469,7 @@ void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPosition
 		// Keep all points if under limit
 		OutPositions = InPositions;
 		OutColors = InColors;
-		UE_LOG(LogTemp, Display, TEXT("[NoCull] Keeping all %d points (under limit)"), InPositions.Num());
+		UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Keeping all %d points (under limit)"), InPositions.Num());
 		return;
 	}
 	
@@ -446,17 +492,21 @@ void USplatCreatorSubsystem::FilterByOcclusion(const TArray<FVector>& InPosition
 		if (i < InColors.Num())
 		{
 			OutColors.Add(InColors[i]);
-	}
-	else
-	{
-				OutColors.Add(FColor::White);
-			}
 		}
-		
-	UE_LOG(LogTemp, Display, TEXT("[NoCull] Uniform sampling: %d -> %d points (step: %d)"), 
+		else
+		{
+			OutColors.Add(FColor::White);
+		}
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Uniform sampling: %d -> %d points (step: %d)"), 
 		InPositions.Num(), OutPositions.Num(), Step);
 }
 
+
+// ============================================================
+// ADD SPHERES
+// ============================================================
 void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>& Positions, TArray<float>& OutSphereSizes)
 {
 	const int32 NumPoints = Positions.Num();
@@ -672,6 +722,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		ScaledPositions.Add(Pos * 125.0f);
 	}
 	CalculateAdaptiveSphereSizes(ScaledPositions, SphereSizes);
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated %d sphere sizes for dense region detection"), SphereSizes.Num());
 	
 	// Add instances in batches
 	int32 NumInstances = FMath::Min(Positions.Num(), Colors.Num());
@@ -707,16 +758,28 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		}
 	}
 	
+	// Store current point positions (scaled and offset) for dense region detection BEFORE broadcasting
+	// Apply the same offset as used for rendering
+	const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f);
+	CurrentPointPositions.Empty();
+	CurrentPointPositions.Reserve(ScaledPositions.Num());
+	for (const FVector& ScaledPos : ScaledPositions)
+	{
+		CurrentPointPositions.Add(ScaledPos + DownOffset);
+	}
+	
+	// Verify SphereSizes is populated (it should be from CalculateAdaptiveSphereSizes call above)
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Stored %d point positions and %d sphere sizes for dense region detection"), 
+		CurrentPointPositions.Num(), SphereSizes.Num());
+	
 	// Force update bounds after all instances are added (critical for preventing culling)
-	// Calculate explicit bounds from all positions
-	if (Positions.Num() > 0)
+	// Calculate explicit bounds from all positions (use CurrentPointPositions which already has offset applied)
+	if (CurrentPointPositions.Num() > 0)
 	{
 		FBox BoundingBox(ForceInit);
-		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f);
-		for (const FVector& Pos : Positions)
+		for (const FVector& Pos : CurrentPointPositions)
 		{
-			FVector ScaledPos = Pos * 125.0f + DownOffset;
-			BoundingBox += ScaledPos;
+			BoundingBox += Pos;
 		}
 		
 		// Expand bounds to account for sphere sizes
@@ -731,9 +794,20 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		CurrentSplatBounds = BoundingBox;
 		bHasSplatBounds = true;
 		
+		FVector BoxSize = BoundingBox.GetSize();
+		FVector BoxCenter = BoundingBox.GetCenter();
 		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set explicit bounds: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
 			BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
 			BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bounds size: X=%.1f, Y=%.1f, Z=%.1f, Center: (%.1f, %.1f, %.1f)"), 
+			BoxSize.X, BoxSize.Y, BoxSize.Z, BoxCenter.X, BoxCenter.Y, BoxCenter.Z);
+		
+		// Notify other subsystems that bounds have been updated (CurrentPointPositions is now stored)
+		OnSplatBoundsUpdated.Broadcast(BoundingBox);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot calculate bounds - CurrentPointPositions is empty"));
 	}
 	
 	// Final visibility and culling overrides
@@ -753,13 +827,15 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	
 	PointCloudComponent->MarkRenderStateDirty();
 	
-	// Store current point positions (scaled and offset) for dense region detection
-	CurrentPointPositions = ScaledPositions;
-	
 	// Store sphere sizes for morphing (already calculated above)
 	
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created point cloud with %d spheres"), NumInstances);
 }
+
+
+// ============================================================
+// MORPH BETWEEN SPLATS
+// ============================================================
 
 void USplatCreatorSubsystem::UpdateMorph()
 {
@@ -918,9 +994,16 @@ void USplatCreatorSubsystem::CompleteMorph()
 			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated bounds after morph: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
 				BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
 				BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
+			
+			// Notify other subsystems that bounds have been updated
+			OnSplatBoundsUpdated.Broadcast(BoundingBox);
 		}
 	}
 }
+
+// ============================================================
+// GET DIMENSIONS FOR HYPER3DOBJECTS
+// ============================================================
 
 FVector2D USplatCreatorSubsystem::GetSplatDimensions() const
 {
@@ -937,13 +1020,38 @@ FVector2D USplatCreatorSubsystem::GetSplatDimensions() const
 	return Dimensions;
 }
 
+FVector USplatCreatorSubsystem::GetSplatCenter() const
+{
+	if (!bHasSplatBounds)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning origin"));
+		return FVector::ZeroVector;
+	}
+	
+	FVector Center = CurrentSplatBounds.GetCenter();
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s"), *Center.ToString());
+	return Center;
+}
+
+FBox USplatCreatorSubsystem::GetSplatBounds() const
+{
+	if (!bHasSplatBounds)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning empty box"));
+		return FBox(ForceInit);
+	}
+	
+	return CurrentSplatBounds;
+}
+
 TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThreshold) const
 {
 	TArray<FVector> DenseRegions;
 	
 	if (CurrentPointPositions.Num() == 0 || SphereSizes.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No point positions or sphere sizes available"));
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No point positions or sphere sizes available (Positions: %d, SphereSizes: %d)"), 
+			CurrentPointPositions.Num(), SphereSizes.Num());
 		return DenseRegions;
 	}
 	
