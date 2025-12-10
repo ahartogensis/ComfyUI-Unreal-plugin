@@ -645,6 +645,13 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 	// Box size is 200x200 by default, but constrained by splat dimensions if smaller
 	const float HalfBoxSize = BoxSize * 0.5f;
 	
+	// Scale exclusion distances based on box size (relative to default 200x200 box)
+	// This makes constraints adapt to available space automatically
+	const float BoxSizeScale = FMath::Clamp(BoxSize / 200.0f, 0.25f, 1.0f); // Scale between 25% and 100%
+	const float ScaledMinSpacing = MinSpacingDistance * BoxSizeScale;
+	const float ScaledSplatExclusion = SplatPointExclusionDistance * BoxSizeScale;
+	const float ScaledComfyExclusion = ComfyStreamExclusionDistance * BoxSizeScale;
+	
 	// Track placed positions to ensure minimum spacing
 	TArray<FVector2D> PlacedPositions;
 	PlacedPositions.Reserve(Count);
@@ -653,97 +660,97 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 		{
 			FObjectInstance& Instance = ObjectInstances[Index];
 			
-		// Try to find a position that's far enough from other objects
-		FVector2D NewPosition = FVector2D::ZeroVector; // Initialize to avoid warning
-		int32 MaxAttempts = 100; // Increased attempts to find valid position (was 20)
-		bool bFoundValidPosition = false;
-		
-		// Calculate random height for this object (will be used in check)
-		float RandomHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
-		
-		for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
-		{
-			// Try a random position
-			NewPosition = FVector2D(
-				Stream.FRandRange(-HalfBoxSize, HalfBoxSize),
-				Stream.FRandRange(-HalfBoxSize, HalfBoxSize)
-			);
+			// Try to find a position that's far enough from other objects
+			FVector2D NewPosition = FVector2D::ZeroVector; // Initialize to avoid warning
+			int32 MaxAttempts = 50; // Reduced attempts since constraints are now adaptive
+			bool bFoundValidPosition = false;
 			
-			// Check if this position is far enough from all existing positions
-			bool bTooClose = false;
-			for (const FVector2D& ExistingPos : PlacedPositions)
-			{
-				float Distance = (NewPosition - ExistingPos).Size();
-				if (Distance < MinSpacingDistance)
-				{
-					bTooClose = true;
-					break;
-				}
-			}
+			// Calculate random height for this object (will be used in check)
+			float RandomHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
 			
-			// Also check if this position is too close to ComfyStream actor (if exclusion zone is set)
-			if (!bTooClose && bHasComfyStreamExclusion)
+			for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 			{
-				FVector2D ComfyStreamPos2D(ComfyStreamExclusionLocation.X - ReferenceLocation.X, 
-				                           ComfyStreamExclusionLocation.Y - ReferenceLocation.Y);
-				float DistanceToComfyStream = (NewPosition - ComfyStreamPos2D).Size();
-				if (DistanceToComfyStream < ComfyStreamExclusionDistance)
+				// Try a random position
+				NewPosition = FVector2D(
+					Stream.FRandRange(-HalfBoxSize, HalfBoxSize),
+					Stream.FRandRange(-HalfBoxSize, HalfBoxSize)
+				);
+				
+				// Check if this position is far enough from all existing positions
+				bool bTooClose = false;
+				for (const FVector2D& ExistingPos : PlacedPositions)
 				{
-					bTooClose = true;
-				}
-			}
-			
-			// Check if this position is too close to any splat points
-			// Check at multiple Z heights to account for object height variation
-			if (!bTooClose)
-			{
-				UWorld* World = GetWorld();
-				if (World)
-				{
-					if (UGameInstance* GameInstance = World->GetGameInstance())
+					float Distance = (NewPosition - ExistingPos).Size();
+					if (Distance < ScaledMinSpacing)
 					{
-						if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
+						bTooClose = true;
+						break;
+					}
+				}
+				
+				// Also check if this position is too close to ComfyStream actor (if exclusion zone is set)
+				if (!bTooClose && bHasComfyStreamExclusion)
+				{
+					FVector2D ComfyStreamPos2D(ComfyStreamExclusionLocation.X - ReferenceLocation.X, 
+					                           ComfyStreamExclusionLocation.Y - ReferenceLocation.Y);
+					float DistanceToComfyStream = (NewPosition - ComfyStreamPos2D).Size();
+					if (DistanceToComfyStream < ScaledComfyExclusion)
+					{
+						bTooClose = true;
+					}
+				}
+				
+				// Check if this position is too close to any splat points
+				if (!bTooClose)
+				{
+					UWorld* World = GetWorld();
+					if (World)
+					{
+						if (UGameInstance* GameInstance = World->GetGameInstance())
 						{
-							// Check horizontal (X,Y) distance only - splat points may be at different Z heights
-							// Use the actual object position (with random height)
-							FVector TestPosition3D = ReferenceLocation + FVector(NewPosition.X, NewPosition.Y, RandomHeight);
-							if (SplatSubsystem->IsPositionTooCloseToSplatPoints(TestPosition3D, SplatPointExclusionDistance, true))
+							if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
 							{
-								bTooClose = true;
+								// Check horizontal (X,Y) distance only - splat points may be at different Z heights
+								// Use the actual object position (with random height)
+								FVector TestPosition3D = ReferenceLocation + FVector(NewPosition.X, NewPosition.Y, RandomHeight);
+								if (SplatSubsystem->IsPositionTooCloseToSplatPoints(TestPosition3D, ScaledSplatExclusion, true))
+								{
+									bTooClose = true;
+								}
 							}
 						}
 					}
 				}
+				
+				if (!bTooClose)
+				{
+					bFoundValidPosition = true;
+					break;
+				}
 			}
 			
-			if (!bTooClose)
+			// If we couldn't find a valid position, use the last tried position anyway
+			// This ensures all objects get placed
+			if (!bFoundValidPosition)
 			{
-				bFoundValidPosition = true;
-				break;
+				UE_LOG(LogTemp, Verbose, TEXT("[Hyper3DObjects] Could not find ideal position for object %d after %d attempts. Using best available position."), 
+					Index, MaxAttempts);
 			}
-		}
-		
-		// If we couldn't find a valid position after max attempts, log a warning
-		if (!bFoundValidPosition)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find valid position for object %d after %d attempts (may intersect with splat points)"), 
-				Index, MaxAttempts);
-		}
-		
-		// Use the position (even if not ideal, to ensure all objects get placed)
-		Instance.BaseX = NewPosition.X;
-		Instance.BaseY = NewPosition.Y;
-		PlacedPositions.Add(NewPosition);
-		
+			
+			// Use the position (even if not ideal, to ensure all objects get placed)
+			Instance.BaseX = NewPosition.X;
+			Instance.BaseY = NewPosition.Y;
+			PlacedPositions.Add(NewPosition);
+			
 			// Random height variation for each object
-			Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
-		// Random rotation: only randomize Yaw (Z-axis rotation), keep Pitch and Roll at base values
-		Instance.RandomRotation = FRotator(
-			BaseMeshRotation.Pitch,                                      // Keep base pitch
-			BaseMeshRotation.Yaw + Stream.FRandRange(0.0f, 360.0f),     // Full 360 degree random yaw (Z-axis)
-			BaseMeshRotation.Roll                                        // Keep base roll
-		);
-	}
+			Instance.BaseHeight = RandomHeight;
+			// Random rotation: only randomize Yaw (Z-axis rotation), keep Pitch and Roll at base values
+			Instance.RandomRotation = FRotator(
+				BaseMeshRotation.Pitch,                                      // Keep base pitch
+				BaseMeshRotation.Yaw + Stream.FRandRange(0.0f, 360.0f),     // Full 360 degree random yaw (Z-axis)
+				BaseMeshRotation.Roll                                        // Keep base roll
+			);
+		}
 	
 	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in %.1fx%.1f box centered at ReferenceLocation"), 
 		Count, BoxSize, BoxSize);

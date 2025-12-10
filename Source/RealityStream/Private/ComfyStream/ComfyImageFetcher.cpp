@@ -7,6 +7,8 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonReader.h"
 #include "Misc/Base64.h"
+#include "Engine/Texture2D.h"
+#include "Math/UnrealMathUtility.h"
 
 UComfyImageFetcher::UComfyImageFetcher()
 {
@@ -98,18 +100,6 @@ static bool IsPngRGB(const TArray<uint8>& PngData)
 	return bIsRGB;
 }
 
-// Checks if an RGB PNG actually contains grayscale-like content (likely depth/mask)
-// by sampling pixel data to see if R=G=B (grayscale) or if there's actual color variation
-// Returns true if the image appears to be grayscale content in an RGB container
-static bool IsRGBPngActuallyGrayscale(const TArray<uint8>& PngData)
-{
-	// Heuristic: very small files are likely masks
-	// Medium to large files could be either RGB or depth
-	// Since we can't easily distinguish RGB from depth by size alone when both are RGB type,
-	// we'll use a conservative threshold - only mark very small files as grayscale
-	const int32 Size = PngData.Num();
-	return Size < 5000; // Only very small files (< 5KB) are likely masks
-}
 
 // Parses a single PNG starting at StartIdx by walking chunks properly.
 // Returns end index (one-past-last byte) if valid PNG found, otherwise INDEX_NONE.
@@ -464,8 +454,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 	// If we got PNGs from this message, add them to accumulator
 	if (Pngs.Num() > 0)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes, split into %d PNG(s)"), In.Num(), Pngs.Num());
-		
 		for (auto& Png : Pngs)
 		{
 			AccumulatedPngMessages.Add(MoveTemp(Png));
@@ -474,7 +462,8 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		MessagesSinceLastFrame++;
 		
 		// Log complete message with total accumulated count
-		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Total accumulated PNGs: %d (expecting %d)"), AccumulatedPngMessages.Num(), ExpectedPngCount);
+		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes (complete)"), In.Num());
+		UE_LOG(LogTemp, Display, TEXT("Total accumulated: %d"), AccumulatedPngMessages.Num());
 		
 		// Protection: If too many messages without completing a frame, clear accumulator
 		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
@@ -495,8 +484,8 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		// When we have all expected PNGs, process them in groups of 3
 		while (AccumulatedPngMessages.Num() >= ExpectedPngCount)
 		{
-			// Check for duplicate PNGs BEFORE assignment - remove only duplicates, not the whole group
-			TArray<int32> DuplicateIndices;
+			// Check for duplicate PNGs BEFORE assignment
+			bool bFoundDuplicates = false;
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
 				for (int32 j = i + 1; j < ExpectedPngCount; ++j)
@@ -507,223 +496,229 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 						                    AccumulatedPngMessages[j].GetData(), 
 						                    AccumulatedPngMessages[i].Num()) == 0)
 						{
-							// Mark duplicate (keep the first one, remove the second)
-							if (!DuplicateIndices.Contains(j))
-							{
-								DuplicateIndices.Add(j);
-							}
+							bFoundDuplicates = true;
+							break;
 						}
 					}
 				}
+				if (bFoundDuplicates) break;
 			}
 			
-			// If we found duplicates, remove them and wait for more PNGs
-			if (DuplicateIndices.Num() > 0)
+			if (bFoundDuplicates)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Found %d duplicate PNGs in accumulator, removing duplicates and waiting for more"), DuplicateIndices.Num());
-				// Remove duplicates in reverse order to maintain indices
-				DuplicateIndices.Sort([](const int32& A, const int32& B) { return A > B; });
-				for (int32 DupIdx : DuplicateIndices)
-				{
-					AccumulatedPngMessages.RemoveAt(DupIdx);
-				}
-				// Don't process yet - wait for more PNGs to arrive
-				break;
+				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+				MessagesSinceLastFrame = 0;
+				continue;
 			}
-			
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Processing %d PNGs from accumulator (total: %d)"), ExpectedPngCount, AccumulatedPngMessages.Num());
 			
 			// Identify PNGs by color type (most reliable), fallback to size-based assignment
 			TArray<int32> AssignedIndices;
 			AssignedIndices.SetNum(ExpectedPngCount);
 			AssignedIndices.Init(INDEX_NONE, ExpectedPngCount);
 			
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Processing %d PNGs, sizes: [%d, %d, %d]"), 
-				ExpectedPngCount,
-				AccumulatedPngMessages[0].Num(),
-				AccumulatedPngMessages[1].Num(),
-				AccumulatedPngMessages[2].Num());
-			
-			// Check color type for each PNG
-			TArray<bool> IsRGB;
-			IsRGB.SetNum(ExpectedPngCount);
-			int32 RGBCount = 0;
-			int32 RGBIndex = INDEX_NONE;
-			bool bUsedColorBasedDetection = false;
-			
-			for (int32 i = 0; i < ExpectedPngCount; ++i)
-			{
-				IsRGB[i] = IsPngRGB(AccumulatedPngMessages[i]);
-				if (IsRGB[i])
-				{
-					RGBCount++;
-					RGBIndex = i;
-				}
-				
-			}
-				TArray<int32> SizeOrder;
-				for (int32 i = 0; i < ExpectedPngCount; ++i)
-				{
-					SizeOrder.Add(i);
-				}
-				// Sort indices by PNG size (smallest to largest)
-				SizeOrder.Sort([this](const int32& A, const int32& B) {
-					return AccumulatedPngMessages[A].Num() < AccumulatedPngMessages[B].Num();
-				});
-					
-				if (SizeOrder.Num() == 3)
-				{
-					AssignedIndices[SizeOrder[0]] = 2; // Smallest = Mask
-					AssignedIndices[SizeOrder[1]] = 1; // Medium = Depth
-					AssignedIndices[SizeOrder[2]] = 0; // Largest = RGB
-					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Assigned via size: RGB=%d (largest), Depth=%d (medium), Mask=%d (smallest)"), 
-						SizeOrder[2], SizeOrder[1], SizeOrder[0]);
-				}
-				else
-				{
-					// Fallback to sequential
-					for (int32 i = 0; i < ExpectedPngCount; ++i)
-					{
-						AssignedIndices[i] = i;
-					}
-				}
-			// Validate assignment: Ensure RGB and Depth are assigned to different accumulator indices
-			int32 RGBAccumIdx = INDEX_NONE;
-			int32 DepthAccumIdx = INDEX_NONE;
-			for (int32 i = 0; i < ExpectedPngCount; ++i)
-			{
-				if (AssignedIndices[i] == 0) RGBAccumIdx = i;
-				if (AssignedIndices[i] == 1) DepthAccumIdx = i;
-			}
-			
-			// Find Mask accumulator index
-			int32 MaskAccumIdx = INDEX_NONE;
-			for (int32 i = 0; i < ExpectedPngCount; ++i)
-			{
-				if (AssignedIndices[i] == 2) MaskAccumIdx = i;
-			}
-			
-			// Log assignment results
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Assignment results: RGB=accum[%d], Depth=accum[%d], Mask=accum[%d]"), 
-				RGBAccumIdx, DepthAccumIdx, MaskAccumIdx);
-			
-			// Check if all 3 indices are assigned
-			bool bAllAssigned = true;
-			for (int32 i = 0; i < ExpectedPngCount; ++i)
-			{
-				if (AssignedIndices[i] == INDEX_NONE)
-				{
-					bAllAssigned = false;
-					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Accumulator index %d was not assigned to any channel!"), i);
-				}
-			}
-			
-			if (!bAllAssigned)
-			{
-				UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] Not all PNGs were assigned! Skipping this frame."));
-				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
-				MessagesSinceLastFrame = 0;
-				continue;
-			}
-			
-			if (RGBAccumIdx != INDEX_NONE && DepthAccumIdx != INDEX_NONE && RGBAccumIdx == DepthAccumIdx)
-			{
-				UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] RGB and Depth assigned to same accumulator index %d! Skipping frame."), RGBAccumIdx);
-				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
-				MessagesSinceLastFrame = 0;
-				continue;
-			}
-			
-			// Decode all PNGs first, then broadcast in correct order (RGB, Depth, Mask)
+			// Decode all PNGs first, then check if they're grayscale to assign channels
 			TArray<UTexture2D*> DecodedTextures;
 			DecodedTextures.SetNum(ExpectedPngCount);
 			
-			// First pass: decode all PNGs
-			if (!PngDecoder)
+			// Helper function to check if a texture is grayscale (R=G=B for sampled pixels)
+			auto IsTextureGrayscale = [](UTexture2D* Texture) -> bool
 			{
-				UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] PngDecoder is null, cannot decode PNGs"));
-				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
-				MessagesSinceLastFrame = 0;
-				continue;
-			}
+				if (!Texture || !Texture->GetPlatformData() || Texture->GetPlatformData()->Mips.Num() == 0)
+				{
+					return false;
+				}
+				
+				FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
+				if (!Mip.BulkData.GetBulkDataSize())
+				{
+					return false;
+				}
+				
+				const int32 Width = Texture->GetSizeX();
+				const int32 Height = Texture->GetSizeY();
+				if (Width <= 0 || Height <= 0)
+				{
+					return false;
+				}
+				
+				// Lock texture for reading
+				const FColor* Pixels = static_cast<const FColor*>(Mip.BulkData.LockReadOnly());
+				if (!Pixels)
+				{
+					return false;
+				}
+				
+				// Sample pixels to check if grayscale (R=G=B)
+				// Sample a grid of pixels (every Nth pixel) to avoid checking all pixels
+				const int32 SampleStep = FMath::Max(1, FMath::Min(Width, Height) / 20); // Sample ~20x20 grid
+				int32 GrayscaleCount = 0;
+				int32 TotalSamples = 0;
+				const int32 MaxSamples = 400; // Limit to 400 samples max
+				
+				for (int32 Y = 0; Y < Height && TotalSamples < MaxSamples; Y += SampleStep)
+				{
+					for (int32 X = 0; X < Width && TotalSamples < MaxSamples; X += SampleStep)
+					{
+						int32 Index = Y * Width + X;
+						if (Index < Width * Height)
+						{
+							const FColor& Pixel = Pixels[Index];
+							// Check if R=G=B (grayscale) with small tolerance for compression artifacts
+							const int32 Tolerance = 2; // Allow 2 levels of difference
+							if (FMath::Abs((int32)Pixel.R - (int32)Pixel.G) <= Tolerance &&
+							    FMath::Abs((int32)Pixel.G - (int32)Pixel.B) <= Tolerance)
+							{
+								GrayscaleCount++;
+							}
+							TotalSamples++;
+						}
+					}
+				}
+				
+				Mip.BulkData.Unlock();
+				
+				// If 95%+ of sampled pixels are grayscale, consider it grayscale
+				return TotalSamples > 0 && (GrayscaleCount * 100 / TotalSamples) >= 95;
+			};
+			
+			// First pass: decode all PNGs and check if they're grayscale
+			if (!PngDecoder) return;
+			TArray<bool> IsGrayscale;
+			IsGrayscale.SetNum(ExpectedPngCount);
+			int32 ColoredIndex = INDEX_NONE;
+			TArray<int32> GrayscaleIndices;
 			
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
-				UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Decoding PNG %d (size: %d bytes)"), i, AccumulatedPngMessages[i].Num());
 				UTexture2D* Tex = PngDecoder->DecodePNGToTexture(AccumulatedPngMessages[i]);
 				DecodedTextures[i] = Tex;
-				if (!Tex)
+				
+				if (Tex)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Failed to decode PNG %d"), i);
+					IsGrayscale[i] = IsTextureGrayscale(Tex);
+					if (IsGrayscale[i])
+					{
+						GrayscaleIndices.Add(i);
+					}
+					else
+					{
+						ColoredIndex = i; // Colored image = RGB
+					}
 				}
 			}
 			
-			// Second pass: broadcast in correct order (RGB=0, Depth=1, Mask=2)
-			int32 SuccessfullyBroadcast = 0;
-			for (int32 BroadcastIndex = 0; BroadcastIndex < ExpectedPngCount; ++BroadcastIndex)
+			// Assign channels based on grayscale detection and size:
+			// - Colored image = RGB (index 0)
+			// - Grayscale images: larger = Depth (index 1), smaller = Mask (index 2)
+			// If we have exactly 1 colored and 2 grayscale, assign correctly
+			// Otherwise fallback to sequential assignment
+			if (ColoredIndex != INDEX_NONE && GrayscaleIndices.Num() == 2)
 			{
-				// Find which accumulator index corresponds to this broadcast index
-				int32 AccumulatorIndex = INDEX_NONE;
-				for (int32 i = 0; i < ExpectedPngCount; ++i)
-				{
-					if (AssignedIndices[i] == BroadcastIndex)
-					{
-						AccumulatorIndex = i;
-						break;
-					}
-				}
+				AssignedIndices[ColoredIndex] = 0; // RGB
 				
-				if (AccumulatorIndex == INDEX_NONE)
-				{
-					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] No accumulator index found for broadcast index %d (RGB=0, Depth=1, Mask=2)"), BroadcastIndex);
-					continue;
-				}
+				// Use size to distinguish Depth (larger) from Mask (smaller)
+				int32 Size0 = AccumulatedPngMessages[GrayscaleIndices[0]].Num();
+				int32 Size1 = AccumulatedPngMessages[GrayscaleIndices[1]].Num();
 				
-				if (!DecodedTextures[AccumulatorIndex])
+				if (Size0 > Size1)
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Decoded texture is null for accumulator index %d (broadcast index %d)"), AccumulatorIndex, BroadcastIndex);
-					continue;
+					// First grayscale is larger = Depth
+					AssignedIndices[GrayscaleIndices[0]] = 1; // Depth
+					AssignedIndices[GrayscaleIndices[1]] = 2; // Mask
 				}
-				
-				// Verify RGB is actually RGB before broadcasting Index 0
-				// But only skip if we're using size-based assignment (not color-type based)
-				// If we already assigned it as RGB via color detection, trust that assignment
-				if (BroadcastIndex == 0)
+				else
 				{
-					bool bIsActuallyRGB = IsPngRGB(AccumulatedPngMessages[AccumulatorIndex]);
-					if (!bIsActuallyRGB && !bUsedColorBasedDetection)
-					{
-						// Only skip if we didn't detect it as RGB via color type (size-based fallback)
-						UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Skipping RGB broadcast - assigned image is not RGB (using size-based fallback)"));
-						continue;
-					}
-					else if (!bIsActuallyRGB && bUsedColorBasedDetection)
-					{
-						UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] RGB verification failed but proceeding anyway (was assigned via color detection)"));
-					}
+					// Second grayscale is larger = Depth
+					AssignedIndices[GrayscaleIndices[0]] = 2; // Mask
+					AssignedIndices[GrayscaleIndices[1]] = 1; // Depth
 				}
-				
-				UTexture2D* Tex = DecodedTextures[AccumulatorIndex];
-				OnTextureReceived.Broadcast(Tex);
-				SuccessfullyBroadcast++;
-			}
-			
-			if (SuccessfullyBroadcast < ExpectedPngCount)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Only processed and broadcast %d/%d textures - some textures may be missing!"), 
-					SuccessfullyBroadcast, ExpectedPngCount);
 			}
 			else
 			{
-				UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast all %d textures"), SuccessfullyBroadcast);
+				// Fallback to sequential assignment if detection fails
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					AssignedIndices[i] = i;
+				}
 			}
+			
+			// Second pass: broadcast textures in CORRECT channel index order (RGB=0, Depth=1, Mask=2)
+			// This ensures HandleStreamTexture receives them in the correct order to assign to correct slots
+			int32 SuccessfullyBroadcast = 0;
+			
+			// Broadcast RGB first (always index 0)
+			if (AssignedIndices.Contains(0))
+			{
+				int32 RGBIndex = INDEX_NONE;
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					if (AssignedIndices[i] == 0)
+					{
+						RGBIndex = i;
+						break;
+					}
+				}
+				if (RGBIndex != INDEX_NONE && DecodedTextures[RGBIndex])
+				{
+					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting RGB texture (FrameBuffer index 0) - texture %d"), RGBIndex);
+					OnTextureReceived.Broadcast(DecodedTextures[RGBIndex]);
+					SuccessfullyBroadcast++;
+				}
+			}
+			
+			// Broadcast Depth second (index 1, optional)
+			if (AssignedIndices.Contains(1))
+			{
+				int32 DepthIndex = INDEX_NONE;
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					if (AssignedIndices[i] == 1)
+					{
+						DepthIndex = i;
+						break;
+					}
+				}
+				if (DepthIndex != INDEX_NONE && DecodedTextures[DepthIndex])
+				{
+					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting Depth texture (FrameBuffer index 1) - texture %d"), DepthIndex);
+					OnTextureReceived.Broadcast(DecodedTextures[DepthIndex]);
+					SuccessfullyBroadcast++;
+				}
+			}
+			else
+			{
+				UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Depth texture missing (optional)"));
+			}
+			
+			// Broadcast Mask third (always index 2)
+			if (AssignedIndices.Contains(2))
+			{
+				int32 MaskIndex = INDEX_NONE;
+				for (int32 i = 0; i < ExpectedPngCount; ++i)
+				{
+					if (AssignedIndices[i] == 2)
+					{
+						MaskIndex = i;
+						break;
+					}
+				}
+				if (MaskIndex != INDEX_NONE && DecodedTextures[MaskIndex])
+				{
+					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting Mask texture (FrameBuffer index 2) - texture %d"), MaskIndex);
+					OnTextureReceived.Broadcast(DecodedTextures[MaskIndex]);
+					SuccessfullyBroadcast++;
+				}
+			}
+			
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast %d textures in order RGB->Depth->Mask (RGB=%s, Depth=%s, Mask=%s)"), 
+				SuccessfullyBroadcast,
+				AssignedIndices.Contains(0) ? TEXT("YES") : TEXT("NO"),
+				AssignedIndices.Contains(1) ? TEXT("YES") : TEXT("NO"),
+				AssignedIndices.Contains(2) ? TEXT("YES") : TEXT("NO"));
 			
 			// Remove processed PNGs from accumulator
 			AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 			MessagesSinceLastFrame = 0;
-			
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Removed %d processed PNGs, remaining in accumulator: %d"), 
-				ExpectedPngCount, AccumulatedPngMessages.Num());
 		}
 	}
 }

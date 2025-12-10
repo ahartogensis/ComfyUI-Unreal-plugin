@@ -78,6 +78,11 @@ private:
 
 	//sequence index for textures 
 	int32 SeqIndex = 0;
+	
+	// Track which channels have been received in the current frame
+	bool bHasRGB = false;
+	bool bHasDepth = false;
+	bool bHasMask = false;
 
 	//Spawned actors from textures
 	UPROPERTY() TArray<AActor*> SpawnedTextureActors;

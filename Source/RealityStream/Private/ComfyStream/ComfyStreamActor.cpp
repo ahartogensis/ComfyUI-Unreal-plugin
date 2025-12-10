@@ -122,9 +122,47 @@ void AComfyStreamActor::HandleStreamTexture(UTexture2D* Texture)
 	if (!Texture || !FrameBuffer)
 		return;
 
-	const int32 Index = SeqIndex % 3;
+	// ComfyImageFetcher broadcasts textures in order: RGB (0), Depth (1), Mask (2)
+	// Assign to first available slot based on what we've received
+	// This handles out-of-order arrival gracefully
+	
+	int32 Index = INDEX_NONE;
+	FString ChannelName;
+	
+	if (!bHasRGB)
+	{
+		// First texture received - always RGB
+		Index = 0;
+		ChannelName = TEXT("RGB");
+		bHasRGB = true;
+	}
+	else if (!bHasDepth)
+	{
+		// Second texture - assign to Depth slot
+		Index = 1;
+		ChannelName = TEXT("Depth");
+		bHasDepth = true;
+	}
+	else if (!bHasMask)
+	{
+		// Third texture - assign to Mask slot
+		Index = 2;
+		ChannelName = TEXT("Mask");
+		bHasMask = true;
+	}
+	else
+	{
+		// All slots filled - shouldn't happen, skip
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Received texture but all slots already filled (SeqIndex=%d)"), SeqIndex);
+		return;
+	}
+	
+	int32 CurrentSeqIndex = SeqIndex; // Log before incrementing
 	FrameBuffer->PushTexture(Texture, Index);
 	SeqIndex++;
+	
+	UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Received %s texture (SeqIndex=%d, FrameBuffer index=%d, HasRGB=%d, HasDepth=%d, HasMask=%d)"), 
+		*ChannelName, CurrentSeqIndex, Index, bHasRGB ? 1 : 0, bHasDepth ? 1 : 0, bHasMask ? 1 : 0);
 
 	//Notify blueprint
 	OnTextureReceived(Texture);
@@ -154,7 +192,19 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 		return;
 	}
 	
+	// Reset sequence index and channel flags FIRST, before processing frame
+	// This ensures next frame's textures start with clean state
+	SeqIndex = 0;
+	bHasRGB = false;
+	bHasDepth = false;
+	bHasMask = false;
+	
 	LatestFrame = Frame;
+	
+	UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Received complete frame - RGB=%s, Mask=%s, Depth=%s"), 
+		Frame.RGB ? *Frame.RGB->GetName() : TEXT("NULL"),
+		Frame.Mask ? *Frame.Mask->GetName() : TEXT("NULL"),
+		Frame.Depth ? *Frame.Depth->GetName() : TEXT("NULL"));
 	
 	// Check if this is actually a new frame (textures are different from last applied frame)
 	// Only update if we have a new complete frame ready to replace the current one
@@ -163,6 +213,7 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 	{
 		// First frame - always apply
 		bIsNewFrame = true;
+		UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] First frame received, applying to actor"));
 	}
 	else
 	{
@@ -173,6 +224,7 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 			Frame.Depth != LastAppliedFrame.Depth)  // Compare depth even if null
 		{
 			bIsNewFrame = true;
+			UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] New frame detected (textures changed), applying to actor"));
 		}
 	}
 	
@@ -204,15 +256,17 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 		return;
 	}
 
-	// Set required textures (RGB and Mask)
-	if (Frame.RGB)
+	// Set required textures (RGB and Mask) - both must be valid
+	if (!Frame.RGB || !Frame.Mask)
 	{
-		DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] ApplyTexturesToMaterial called with invalid frame - RGB=%s, Mask=%s"), 
+			Frame.RGB ? TEXT("valid") : TEXT("NULL"),
+			Frame.Mask ? TEXT("valid") : TEXT("NULL"));
+		return;
 	}
-	if (Frame.Mask)
-	{
-		DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
-	}
+	
+	DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
+	DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
 	
 	// Set Depth if available (optional)
 	if (Frame.Depth)
@@ -266,15 +320,15 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 		UTexture* CurrentRGB = nullptr;
 		UTexture* CurrentDepth = nullptr;
 		UTexture* CurrentMask = nullptr;
-		bool bHasRGB = ActorDataPtr->Material->GetTextureParameterValue(TEXT("RGB_Map"), CurrentRGB);
-		bool bHasDepth = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Depth_Map"), CurrentDepth);
-		bool bHasMask = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Mask_Map"), CurrentMask);
+		bool bMaterialHasRGB = ActorDataPtr->Material->GetTextureParameterValue(TEXT("RGB_Map"), CurrentRGB);
+		bool bMaterialHasDepth = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Depth_Map"), CurrentDepth);
+		bool bMaterialHasMask = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Mask_Map"), CurrentMask);
 		
 		// Check if textures changed (RGB and Mask are required, Depth is optional)
-		bool bTexturesChanged = !bHasRGB || !bHasMask || 
+		bool bTexturesChanged = !bMaterialHasRGB || !bMaterialHasMask || 
 		                        (CurrentRGB != Frame.RGB || CurrentMask != Frame.Mask);
 		// Also check if Depth changed (if it exists)
-		if (Frame.Depth && (!bHasDepth || CurrentDepth != Frame.Depth))
+		if (Frame.Depth && (!bMaterialHasDepth || CurrentDepth != Frame.Depth))
 		{
 			bTexturesChanged = true;
 		}

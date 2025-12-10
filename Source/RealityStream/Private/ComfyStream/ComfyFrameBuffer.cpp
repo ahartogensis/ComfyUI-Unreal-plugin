@@ -7,7 +7,12 @@
 // Frame is complete when RGB and Mask are present (Depth is optional)
 void UComfyFrameBuffer::PushTexture(UTexture2D* Tex, int Index)
 {
-	if (!Tex) return;
+	// Validate texture is valid before assigning
+	if (!Tex || !IsValid(Tex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyFrameBuffer] Received invalid texture at index %d"), Index);
+		return;
+	}
 
 	//textures are assigned based on order of arrival
 	if (Index == 0) 
@@ -25,10 +30,28 @@ void UComfyFrameBuffer::PushTexture(UTexture2D* Tex, int Index)
 
 	NextIndex = (NextIndex + 1) % 3;
 
-	if (Frame.IsComplete())
+	// Track how many textures we've received in this frame
+	TextureCount++;
+	
+	// Check if frame is complete (RGB + Mask required, Depth optional)
+	// Both RGB and Mask must be valid (not null) for frame to be complete
+	if (Frame.RGB && Frame.Mask && IsValid(Frame.RGB) && IsValid(Frame.Mask))
 	{
-		OnFullFrameReady.Broadcast(Frame);
-		Reset();
+		UE_LOG(LogTemp, Display, TEXT("[ComfyFrameBuffer] Frame complete (RGB + Mask). TextureCount=%d, Index=%d"), TextureCount, Index);
+		FComfyFrame CompleteFrame = Frame; // Copy frame before reset
+		Reset(); // Reset immediately so next frame starts clean
+		OnFullFrameReady.Broadcast(CompleteFrame); // Broadcast after reset
+	}
+	// If we have all three textures, frame should be complete
+	else if (Frame.RGB && Frame.Depth && Frame.Mask)
+	{
+		if (Frame.IsComplete())
+		{
+			UE_LOG(LogTemp, Display, TEXT("[ComfyFrameBuffer] Frame complete (RGB + Depth + Mask). TextureCount=%d"), TextureCount);
+			OnFullFrameReady.Broadcast(Frame);
+			Reset();
+			TextureCount = 0;
+		}
 	}
 }
 
@@ -36,4 +59,5 @@ void UComfyFrameBuffer::Reset()
 {
 	Frame = {};
 	NextIndex = 0;
+	TextureCount = 0; // Reset texture count when frame completes
 }

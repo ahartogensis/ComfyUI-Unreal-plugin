@@ -22,4 +22,5 @@ public:
 private:
     FComfyFrame Frame;
     int NextIndex = 0; //loop through textures (0=RGB, 1=Depth, 2=Mask) - Depth is optional
+    int32 TextureCount = 0; // Track how many textures have been received in current frame
 };
