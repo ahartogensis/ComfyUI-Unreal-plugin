@@ -2,8 +2,9 @@
 #include "HAL/UnrealMemory.h"
 #include "Misc/AssertionMacros.h"
 
-//recives the textures in batches of 3 and pairs the textures into a single frame
-// Expected order from ComfyUI: RGB (Index 0), Depth (Index 1), Mask (Index 2)
+//receives textures and pairs them into a single frame
+// Expected order from ComfyUI: RGB (Index 0), Depth (Index 1, optional), Mask (Index 2)
+// Frame is complete when RGB and Mask are present (Depth is optional)
 void UComfyFrameBuffer::PushTexture(UTexture2D* Tex, int Index)
 {
 	if (!Tex) return;

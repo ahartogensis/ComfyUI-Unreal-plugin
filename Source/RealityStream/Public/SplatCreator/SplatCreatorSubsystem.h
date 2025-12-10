@@ -41,6 +41,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	TArray<FVector> GetDensePointRegions(float DensityThreshold = 0.15f) const;
 
+	// Check if a position is too close to any splat point (for intersection avoidance)
+	// Returns true if the position is within MinDistance of any splat point
+	// bCheckHorizontalOnly: if true, only checks X,Y distance (ignores Z), useful when objects and splats are at different heights
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
+	bool IsPositionTooCloseToSplatPoints(const FVector& Position, float MinDistance = 50.0f, bool bCheckHorizontalOnly = true) const;
+
 	// Event broadcast when splat bounds are updated (useful for other subsystems to react)
 	UPROPERTY(BlueprintAssignable, Category = "SplatCreator")
 	FOnSplatBoundsUpdated OnSplatBoundsUpdated;

@@ -25,9 +25,6 @@ void USplatCreatorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
     UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem initialized"));
-
-	// Note: StartPointCloudSystem() will be called automatically when world is ready
-	// Or call it manually from Blueprint using "Get Splat Creator Subsystem" -> "Start Point Cloud System"
 }
 
 
@@ -129,12 +126,6 @@ void USplatCreatorSubsystem::ScanForPLYFiles()
 	PlyFiles.Sort();
 	
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files in %s"), PlyFiles.Num(), *AbsolutePath);
-	
-	// Log file names for debugging
-	for (const FString& File : PlyFiles)
-	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator]   - %s"), *File);
-	}
 }
 
 // ============================================================
@@ -196,21 +187,13 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 	{
 		Positions = FilteredPositions;
 		Colors = FilteredColors;
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] After occlusion culling: %d points"), Positions.Num());
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] After filtering: %d points"), Positions.Num());
         }
         else
         {
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Occlusion culling removed all points, using original"));
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Filtering removed all points, using original"));
 	}
-	
-	// Limit to 500k points
-	if (Positions.Num() > 500000)
-	{
-		Positions.SetNum(500000);
-		Colors.SetNum(500000);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Limited to 500k points"));
-	}
-	
+
 	// Create or morph point cloud
 	if (PointCloudComponent && bIsMorphing == false)
 	{
@@ -1075,4 +1058,41 @@ TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThresh
 		DenseCount, CurrentPointPositions.Num(), MaxDenseSphereSize);
 	
 	return DenseRegions;
+}
+
+bool USplatCreatorSubsystem::IsPositionTooCloseToSplatPoints(const FVector& Position, float MinDistance, bool bCheckHorizontalOnly) const
+{
+	if (CurrentPointPositions.Num() == 0)
+	{
+		// No splat points loaded yet, so position is valid
+		return false;
+	}
+
+	// Check distance to all splat points
+	// For performance, we could optimize this with spatial partitioning, but for now check all points
+	const float MinDistanceSquared = MinDistance * MinDistance;
+	
+	for (const FVector& SplatPoint : CurrentPointPositions)
+	{
+		float DistanceSquared;
+		if (bCheckHorizontalOnly)
+		{
+			// Only check horizontal (X,Y) distance, ignore Z
+			FVector2D Pos2D(Position.X, Position.Y);
+			FVector2D Splat2D(SplatPoint.X, SplatPoint.Y);
+			DistanceSquared = FVector2D::DistSquared(Pos2D, Splat2D);
+		}
+		else
+		{
+			// Check full 3D distance
+			DistanceSquared = FVector::DistSquared(Position, SplatPoint);
+		}
+		
+		if (DistanceSquared < MinDistanceSquared)
+		{
+			return true; // Position is too close to a splat point
+		}
+	}
+	
+	return false; // Position is far enough from all splat points
 }

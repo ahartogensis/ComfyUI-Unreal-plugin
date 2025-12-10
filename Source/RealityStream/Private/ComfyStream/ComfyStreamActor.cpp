@@ -88,29 +88,8 @@ void AComfyStreamActor::Tick(float DeltaTime)
 			UpdateActorLerp(Data, LatestFrame, DeltaTime);
 		}
 
-		//Update opacity fade-out
-		if (Data.bIsFadingOut && IsValid(Data.Material))
-		{
-			Data.OpacityAlpha = FMath::Max(0.0f, Data.OpacityAlpha - (DeltaTime / FadeOutDuration));
-			Data.Material->SetScalarParameterValue(TEXT("Opacity"), Data.OpacityAlpha);
-			
-			//When fade completes, destroy actor
-			if (Data.OpacityAlpha <= 0.0f)
-			{
-				if (IsValid(Data.Actor))
-				{
-					AActor* ActorToDestroy = Data.Actor;
-					ActorToDestroy->Destroy();
-					SpawnedTextureActors.Remove(ActorToDestroy);
-				}
-				
-				//Remove from ActorData
-				GetWorld()->GetTimerManager().ClearTimer(Data.DestroyTimer);
-				GetWorld()->GetTimerManager().ClearTimer(Data.LerpTimer);
-				ActorData.RemoveAt(i);
-				continue;
-			}
-		}
+		// Opacity fade-out disabled - actors stay up permanently until replaced by new frame
+		// (Removed fade-out logic so images persist)
 	}
 }
 
@@ -165,9 +144,20 @@ void AComfyStreamActor::HandleStreamError(const FString& Error)
 
 void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 {
+	// Only process if frame is complete (has RGB and Mask at minimum)
+	if (!Frame.IsComplete())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Received incomplete frame - RGB=%s, Mask=%s, Depth=%s. Waiting for complete frame."),
+			Frame.RGB ? TEXT("valid") : TEXT("NULL"),
+			Frame.Mask ? TEXT("valid") : TEXT("NULL"),
+			Frame.Depth ? TEXT("valid") : TEXT("NULL"));
+		return;
+	}
+	
 	LatestFrame = Frame;
 	
 	// Check if this is actually a new frame (textures are different from last applied frame)
+	// Only update if we have a new complete frame ready to replace the current one
 	bool bIsNewFrame = false;
 	if (!LastAppliedFrame.IsComplete())
 	{
@@ -177,15 +167,16 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 	else
 	{
 		// Compare textures to see if this is a new frame
+		// RGB and Mask are required, Depth is optional
 		if (Frame.RGB != LastAppliedFrame.RGB ||
-			Frame.Depth != LastAppliedFrame.Depth ||
-			Frame.Mask != LastAppliedFrame.Mask)
+			Frame.Mask != LastAppliedFrame.Mask ||
+			Frame.Depth != LastAppliedFrame.Depth)  // Compare depth even if null
 		{
 			bIsNewFrame = true;
 		}
 	}
 	
-	// Only update actor if this is a new frame
+	// Only update actor if this is a new complete frame ready to replace the current one
 	if (bIsNewFrame)
 	{
 		ApplyTexturesToMaterial(Frame);
@@ -195,6 +186,10 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 		
 		// Update last applied frame
 		LastAppliedFrame = Frame;
+	}
+	else
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ComfyStreamActor] Frame unchanged, skipping update"));
 	}
 }
 
@@ -209,9 +204,25 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 		return;
 	}
 
-	DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
-	DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
-	DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
+	// Set required textures (RGB and Mask)
+	if (Frame.RGB)
+	{
+		DynMat->SetTextureParameterValue(RGBParam, Frame.RGB);
+	}
+	if (Frame.Mask)
+	{
+		DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
+	}
+	
+	// Set Depth if available (optional)
+	if (Frame.Depth)
+	{
+		DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
+	}
+	else
+	{
+		DynMat->SetTextureParameterValue(DepthParam, nullptr);
+	}
 }
 
 void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVector& WorldPosition)
@@ -259,20 +270,34 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 		bool bHasDepth = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Depth_Map"), CurrentDepth);
 		bool bHasMask = ActorDataPtr->Material->GetTextureParameterValue(TEXT("Mask_Map"), CurrentMask);
 		
-		// If any texture is not set or different, update all textures
-		// This ensures textures are always set, even if GetTextureParameterValue fails
-		bool bTexturesChanged = !bHasRGB || !bHasDepth || !bHasMask || 
-		                        (CurrentRGB != Frame.RGB || CurrentDepth != Frame.Depth || CurrentMask != Frame.Mask);
+		// Check if textures changed (RGB and Mask are required, Depth is optional)
+		bool bTexturesChanged = !bHasRGB || !bHasMask || 
+		                        (CurrentRGB != Frame.RGB || CurrentMask != Frame.Mask);
+		// Also check if Depth changed (if it exists)
+		if (Frame.Depth && (!bHasDepth || CurrentDepth != Frame.Depth))
+		{
+			bTexturesChanged = true;
+		}
 		
 		if (bTexturesChanged)
 		{
-			// Ensure all textures are valid before setting
-			if (Frame.RGB && Frame.Depth && Frame.Mask)
+			// Ensure required textures (RGB and Mask) are valid before setting
+			if (Frame.RGB && Frame.Mask)
 			{
-				//Set new textures - update directly (smooth transition handled by material if it supports it)
+				//Set required textures
 				ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
-				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
 				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
+				
+				//Set Depth if available (optional)
+				if (Frame.Depth)
+				{
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
+				}
+				else
+				{
+					// Clear depth texture if not present
+					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), nullptr);
+				}
 
 				//If material supports lerp alpha parameter, enable lerping
 				float LerpParam = 0.0f;
@@ -282,8 +307,15 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 					ActorDataPtr->bIsLerping = true;
 					//Set new textures as target for lerp
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
-					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
+					if (Frame.Depth)
+					{
+						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
+					}
+					else
+					{
+						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), nullptr);
+					}
 				}
 				
 				UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Updated textures on actor: RGB=%s, Depth=%s, Mask=%s"), 
@@ -293,9 +325,8 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Frame has null textures - RGB=%s, Depth=%s, Mask=%s"), 
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Frame missing required textures - RGB=%s, Mask=%s"), 
 					Frame.RGB ? TEXT("valid") : TEXT("NULL"),
-					Frame.Depth ? TEXT("valid") : TEXT("NULL"),
 					Frame.Mask ? TEXT("valid") : TEXT("NULL"));
 			}
 		}
@@ -314,12 +345,22 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 			ActorDataPtr->Material = UMaterialInstanceDynamic::Create(BaseMaterial, Actor);
 			if (ActorDataPtr->Material)
 			{
-				// Ensure all textures are valid before setting
-				if (Frame.RGB && Frame.Depth && Frame.Mask)
+				// Ensure required textures (RGB and Mask) are valid before setting
+				if (Frame.RGB && Frame.Mask)
 				{
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
-					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
+					
+					// Set Depth if available (optional)
+					if (Frame.Depth)
+					{
+						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), Frame.Depth);
+					}
+					else
+					{
+						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map"), nullptr);
+					}
+					
 					ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
 					MeshComp->SetMaterial(0, ActorDataPtr->Material);
 					ActorDataPtr->LerpAlpha = 1.0f;
@@ -332,9 +373,8 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 				}
 				else
 				{
-					UE_LOG(LogTemp, Error, TEXT("[ComfyStreamActor] Failed to set textures on new actor - Frame has null textures: RGB=%s, Depth=%s, Mask=%s"), 
+					UE_LOG(LogTemp, Error, TEXT("[ComfyStreamActor] Failed to set textures on new actor - Frame missing required textures: RGB=%s, Mask=%s"), 
 						Frame.RGB ? TEXT("valid") : TEXT("NULL"),
-						Frame.Depth ? TEXT("valid") : TEXT("NULL"),
 						Frame.Mask ? TEXT("valid") : TEXT("NULL"));
 				}
 			}
@@ -351,15 +391,15 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 		}
 	}
 
-	//Reset destroy timer and opacity
-	GetWorld()->GetTimerManager().ClearTimer(ActorDataPtr->DestroyTimer);
+	//Reset opacity to ensure actor is visible (no auto-destruction - actors stay up permanently)
 	ActorDataPtr->OpacityAlpha = 1.0f;
 	ActorDataPtr->bIsFadingOut = false;
 	if (ActorDataPtr->Material)
 	{
 		ActorDataPtr->Material->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
 	}
-	DestroyActorDelayed(Actor);
+	// Clear any existing destroy timer (actors should not auto-destroy)
+	GetWorld()->GetTimerManager().ClearTimer(ActorDataPtr->DestroyTimer);
 }
 
 AActor* AComfyStreamActor::FindOrSpawnActorAtLocation(const FVector& WorldPosition)
@@ -431,50 +471,37 @@ void AComfyStreamActor::UpdateActorLerp(FActorLerpData& Data, const FComfyFrame&
 	Data.LerpAlpha = FMath::Clamp(Data.LerpAlpha + (DeltaTime * LerpSpeed), 0.0f, 1.0f);
 	Data.Material->SetScalarParameterValue(TEXT("LerpAlpha"), Data.LerpAlpha);
 
-	if (Data.LerpAlpha >= 1.0f)
-	{
-		//Lerp complete - swap textures
-		UTexture* NewRGB = nullptr;
-		UTexture* NewDepth = nullptr;
-		UTexture* NewMask = nullptr;
-		Data.Material->GetTextureParameterValue(TEXT("RGB_Map_New"), NewRGB);
-		Data.Material->GetTextureParameterValue(TEXT("Depth_Map_New"), NewDepth);
-		Data.Material->GetTextureParameterValue(TEXT("Mask_Map_New"), NewMask);
+		if (Data.LerpAlpha >= 1.0f)
+		{
+			//Lerp complete - swap textures
+			UTexture* NewRGB = nullptr;
+			UTexture* NewDepth = nullptr;
+			UTexture* NewMask = nullptr;
+			Data.Material->GetTextureParameterValue(TEXT("RGB_Map_New"), NewRGB);
+			Data.Material->GetTextureParameterValue(TEXT("Depth_Map_New"), NewDepth);
+			Data.Material->GetTextureParameterValue(TEXT("Mask_Map_New"), NewMask);
 
-		if (NewRGB) Data.Material->SetTextureParameterValue(TEXT("RGB_Map"), NewRGB);
-		if (NewDepth) Data.Material->SetTextureParameterValue(TEXT("Depth_Map"), NewDepth);
-		if (NewMask) Data.Material->SetTextureParameterValue(TEXT("Mask_Map"), NewMask);
+			// Swap required textures (RGB and Mask)
+			if (NewRGB) Data.Material->SetTextureParameterValue(TEXT("RGB_Map"), NewRGB);
+			if (NewMask) Data.Material->SetTextureParameterValue(TEXT("Mask_Map"), NewMask);
+			
+			// Swap Depth if available (optional)
+			if (NewDepth)
+			{
+				Data.Material->SetTextureParameterValue(TEXT("Depth_Map"), NewDepth);
+			}
+			else
+			{
+				Data.Material->SetTextureParameterValue(TEXT("Depth_Map"), nullptr);
+			}
 
-		Data.bIsLerping = false;
-	}
+			Data.bIsLerping = false;
+		}
 }
 
 void AComfyStreamActor::DestroyActorDelayed(AActor* Actor)
 {
-	//Find actor data
-	FActorLerpData* ActorDataPtr = nullptr;
-	for (FActorLerpData& Data : ActorData)
-	{
-		if (Data.Actor == Actor)
-		{
-			ActorDataPtr = &Data;
-			break;
-		}
-	}
-
-	//Start fade-out timer - after lifetime expires, begin opacity fade
-	GetWorld()->GetTimerManager().SetTimer(
-		ActorDataPtr->DestroyTimer,
-		[this, ActorDataPtr]()
-		{
-			if (ActorDataPtr->Actor && ActorDataPtr->Material)
-			{
-				//Start opacity fade-out
-				ActorDataPtr->bIsFadingOut = true;
-				ActorDataPtr->OpacityAlpha = 1.0f;
-			}
-		},
-		ActorLifetimeSeconds - FadeOutDuration,
-		false
-	);
+	// Actors now persist permanently - no auto-destruction
+	// This function is kept for compatibility but does nothing
+	// Actors will only be replaced when a new frame arrives
 }

@@ -1,7 +1,9 @@
 #include "MeshImport/Hyper3DObjectsSubsystem.h"
 #include "SplatCreator/SplatCreatorSubsystem.h"
+#include "ComfyStream/ComfyStreamActor.h"
 
 #include "Engine/World.h"
+#include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -39,15 +41,16 @@
 #include "Materials/MaterialExpressionConstant.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #endif
-#include "AssetRegistry/AssetRegistryModule.h"
 
 
 namespace Hyper3DObjectsImport
 {
-	// User's material with texture parameters
-	static constexpr TCHAR ProceduralMeshTextureMaterialPath[] = TEXT("/Game/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
-	static constexpr TCHAR ProceduralMeshTextureMaterialPathAlt[] = TEXT("/Game/ImportedTextures/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
-	// Try to use materials that exist in UE5.6
+	// Primary material path - the specific material the user wants to use
+	static constexpr TCHAR ProceduralMeshTextureMaterialPath[] = TEXT("/Game/_GENERATED/Materials/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
+	// Fallback paths (in case primary is not found)
+	static constexpr TCHAR ProceduralMeshTextureMaterialPathAlt[] = TEXT("/Game/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
+	static constexpr TCHAR ProceduralMeshTextureMaterialPathAlt2[] = TEXT("/Game/ImportedTextures/M_ProceduralMeshTexture.M_ProceduralMeshTexture");
+	// Try to use materials that exist in UE5.6 (only as last resort fallback)
 	static constexpr TCHAR VertexColorMaterialPathA[] = TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor");
 	static constexpr TCHAR VertexColorMaterialPathB[] = TEXT("/Game/M_VertexColor.M_VertexColor");
 	static constexpr TCHAR EditorVertexColorMaterialPath[] = TEXT("/Engine/EditorMaterials/WidgetVertexColorMaterial");
@@ -236,6 +239,49 @@ void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLo
 	{
 		UpdateObjectMotion();
 	}
+}
+
+void UHyper3DObjectsSubsystem::SetComfyStreamExclusionZone(const FVector& ComfyStreamLocation)
+{
+	ComfyStreamExclusionLocation = ComfyStreamLocation;
+	bHasComfyStreamExclusion = true;
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] ComfyStream exclusion zone set at: %s (exclusion distance: %.1f)"), 
+		*ComfyStreamExclusionLocation.ToString(), ComfyStreamExclusionDistance);
+	
+	// Update object layout to avoid the exclusion zone if objects are already spawned
+	if (bImportsActive)
+	{
+		UpdateObjectLayout();
+		UpdateObjectMotion();
+	}
+}
+
+void UHyper3DObjectsSubsystem::FindAndSetComfyStreamExclusionZone()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Cannot find ComfyStream actor - no world available"));
+		return;
+	}
+
+	// Find all ComfyStreamActor instances in the world
+	TArray<AActor*> FoundActors;
+	UGameplayStatics::GetAllActorsOfClass(World, AComfyStreamActor::StaticClass(), FoundActors);
+
+	if (FoundActors.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No ComfyStreamActor found in the world"));
+		bHasComfyStreamExclusion = false;
+		return;
+	}
+
+	// Use the first ComfyStream actor found
+	AActor* ComfyStreamActor = FoundActors[0];
+	FVector ComfyStreamLocation = ComfyStreamActor->GetActorLocation();
+	
+	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found ComfyStreamActor at: %s"), *ComfyStreamLocation.ToString());
+	SetComfyStreamExclusionZone(ComfyStreamLocation);
 }
 
 void UHyper3DObjectsSubsystem::SetTotalInstances(int32 InTotalInstances)
@@ -497,24 +543,37 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 		
 		// Spawn instances with weighted random selection favoring OBJ files with fewer instances
-		const int32 MaxSpawnPerFrame = 5; // Spawn up to 10 per refresh cycle
+		const int32 MaxSpawnPerFrame = 10; // Spawn up to 10 per refresh cycle
 		int32 SpawnCount = FMath::Min(InstancesToSpawn, MaxSpawnPerFrame);
 		
+		// Use a persistent random stream seeded with current time for this refresh cycle
 		FRandomStream RandomStream(FDateTime::Now().GetTicks());
+		
+		// Log current distribution
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Current distribution:"));
+		for (const FString& ObjPath : DesiredPathList)
+		{
+			int32 Count = ObjInstanceCounts.FindRef(ObjPath);
+			UE_LOG(LogTemp, Display, TEXT("  %s: %d instances"), *FPaths::GetCleanFilename(ObjPath), Count);
+		}
+		
 		for (int32 i = 0; i < SpawnCount; ++i)
 		{
-			// Build weighted list: OBJ files with fewer instances get higher weight
+			// Build weighted list: OBJ files with fewer instances get much higher weight
 			TArray<FString> WeightedObjList;
+			int32 TotalWeight = 0;
+			
 			for (const FString& ObjPath : DesiredPathList)
 			{
 				int32 CurrentCount = ObjInstanceCounts.FindRef(ObjPath);
-				// Weight = inverse of (count + 1), so files with 0 instances get weight 1, 1 instance gets 0.5, etc.
-				// Multiply by 10 to get integer weights (0 instances = 10, 1 instance = 5, 2 instances = 3, etc.)
-				int32 Weight = FMath::Max(1, 10 / (CurrentCount + 1));
+				// Stronger weighting: files with 0 instances get weight 100, 1 instance gets 50, 2 gets 33, etc.
+				// This ensures much better distribution
+				int32 Weight = FMath::Max(1, 100 / (CurrentCount + 1));
 				for (int32 w = 0; w < Weight; ++w)
 				{
 					WeightedObjList.Add(ObjPath);
 				}
+				TotalWeight += Weight;
 			}
 			
 			if (WeightedObjList.Num() > 0)
@@ -522,27 +581,37 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 				// Pick randomly from weighted list
 				int32 RandomIndex = RandomStream.RandRange(0, WeightedObjList.Num() - 1);
 				const FString& SelectedObjPath = WeightedObjList[RandomIndex];
-				
-				FCachedMeshData* CachedData = MeshDataCache.Find(SelectedObjPath);
-				if (CachedData && CachedData->bIsValid)
-				{
+			
+			FCachedMeshData* CachedData = MeshDataCache.Find(SelectedObjPath);
+			if (CachedData && CachedData->bIsValid)
+			{
 					if (SpawnObjectFromCachedData(SelectedObjPath, *CachedData))
 					{
-						// Update count for this OBJ file
+						// Update count for this OBJ file immediately so next selection is informed
 						ObjInstanceCounts.FindOrAdd(SelectedObjPath)++;
+						UE_LOG(LogTemp, Verbose, TEXT("[Hyper3DObjects] Spawned instance %d/%d from %s (now has %d instances)"), 
+							i + 1, SpawnCount, *FPaths::GetCleanFilename(SelectedObjPath), ObjInstanceCounts.FindRef(SelectedObjPath));
 					}
 					else
-					{
-						UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
-					}
-					
-					// Yield to game thread every few spawns to prevent freezing
-					if ((i + 1) % 5 == 0)
-					{
-						FPlatformProcess::Sleep(0.001f); // 1ms sleep to yield
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
+				}
+				
+				// Yield to game thread every few spawns to prevent freezing
+				if ((i + 1) % 5 == 0)
+				{
+					FPlatformProcess::Sleep(0.001f); // 1ms sleep to yield
 					}
 				}
 			}
+		}
+		
+		// Log final distribution
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Final distribution after spawning:"));
+		for (const FString& ObjPath : DesiredPathList)
+		{
+			int32 Count = ObjInstanceCounts.FindRef(ObjPath);
+			UE_LOG(LogTemp, Display, TEXT("  %s: %d instances"), *FPaths::GetCleanFilename(ObjPath), Count);
 		}
 		
 		if (SpawnCount < InstancesToSpawn)
@@ -579,15 +648,18 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 	// Track placed positions to ensure minimum spacing
 	TArray<FVector2D> PlacedPositions;
 	PlacedPositions.Reserve(Count);
-	
-	for (int32 Index = 0; Index < Count; ++Index)
-	{
-		FObjectInstance& Instance = ObjectInstances[Index];
 		
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FObjectInstance& Instance = ObjectInstances[Index];
+			
 		// Try to find a position that's far enough from other objects
-		FVector2D NewPosition;
-		int32 MaxAttempts = 20; // Limit attempts to avoid infinite loops
+		FVector2D NewPosition = FVector2D::ZeroVector; // Initialize to avoid warning
+		int32 MaxAttempts = 100; // Increased attempts to find valid position (was 20)
 		bool bFoundValidPosition = false;
+		
+		// Calculate random height for this object (will be used in check)
+		float RandomHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
 		
 		for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 		{
@@ -609,6 +681,41 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 				}
 			}
 			
+			// Also check if this position is too close to ComfyStream actor (if exclusion zone is set)
+			if (!bTooClose && bHasComfyStreamExclusion)
+			{
+				FVector2D ComfyStreamPos2D(ComfyStreamExclusionLocation.X - ReferenceLocation.X, 
+				                           ComfyStreamExclusionLocation.Y - ReferenceLocation.Y);
+				float DistanceToComfyStream = (NewPosition - ComfyStreamPos2D).Size();
+				if (DistanceToComfyStream < ComfyStreamExclusionDistance)
+				{
+					bTooClose = true;
+				}
+			}
+			
+			// Check if this position is too close to any splat points
+			// Check at multiple Z heights to account for object height variation
+			if (!bTooClose)
+			{
+				UWorld* World = GetWorld();
+				if (World)
+				{
+					if (UGameInstance* GameInstance = World->GetGameInstance())
+					{
+						if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
+						{
+							// Check horizontal (X,Y) distance only - splat points may be at different Z heights
+							// Use the actual object position (with random height)
+							FVector TestPosition3D = ReferenceLocation + FVector(NewPosition.X, NewPosition.Y, RandomHeight);
+							if (SplatSubsystem->IsPositionTooCloseToSplatPoints(TestPosition3D, SplatPointExclusionDistance, true))
+							{
+								bTooClose = true;
+							}
+						}
+					}
+				}
+			}
+			
 			if (!bTooClose)
 			{
 				bFoundValidPosition = true;
@@ -616,14 +723,20 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 			}
 		}
 		
-		// If we couldn't find a valid position after max attempts, use the last tried position anyway
-		// This prevents objects from being placed too close, but ensures all objects get placed
+		// If we couldn't find a valid position after max attempts, log a warning
+		if (!bFoundValidPosition)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find valid position for object %d after %d attempts (may intersect with splat points)"), 
+				Index, MaxAttempts);
+		}
+		
+		// Use the position (even if not ideal, to ensure all objects get placed)
 		Instance.BaseX = NewPosition.X;
 		Instance.BaseY = NewPosition.Y;
 		PlacedPositions.Add(NewPosition);
 		
-		// Random height variation for each object
-		Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+			// Random height variation for each object
+			Instance.BaseHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
 		// Random rotation: only randomize Yaw (Z-axis rotation), keep Pitch and Roll at base values
 		Instance.RandomRotation = FRotator(
 			BaseMeshRotation.Pitch,                                      // Keep base pitch
@@ -1434,7 +1547,17 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 	// First, try to find the user's material using AssetRegistry (more reliable)
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	
-	// Search for materials with "ProceduralMeshTexture" in the name
+	// Try the specific path first: /Game/_GENERATED/Materials/M_ProceduralMeshTexture
+	// Use SoftObjectPath instead of deprecated GetAssetByObjectPath
+	FSoftObjectPath SpecificMaterialPath(TEXT("/Game/_GENERATED/Materials/M_ProceduralMeshTexture.M_ProceduralMeshTexture"));
+	BaseMaterial = Cast<UMaterialInterface>(SpecificMaterialPath.TryLoad());
+	if (BaseMaterial)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via SoftObjectPath at specific path: %s"), *BaseMaterial->GetPathName());
+		return BaseMaterial;
+	}
+	
+	// Search for materials with "ProceduralMeshTexture" in the name (fallback)
 	TArray<FAssetData> AssetDataList;
 	FARFilter Filter;
 	Filter.ClassPaths.Add(UMaterial::StaticClass()->GetClassPathName());
@@ -1442,7 +1565,7 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 	Filter.bRecursivePaths = true;
 	
 	// Try specific paths first
-	Filter.PackagePaths.Add(FName("/Game"));
+	Filter.PackagePaths.Add(FName("/Game/_GENERATED/Materials")); // Prioritize the _GENERATED folder
 	AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
 	
 	// Look for materials with "ProceduralMeshTexture" or "M_ProceduralMeshTexture" in the name
@@ -1455,29 +1578,65 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 			BaseMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
 			if (BaseMaterial)
 			{
+				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via AssetRegistry: %s"), *BaseMaterial->GetPathName());
 				return BaseMaterial;
 			}
 		}
 	}
 	
-	// Try direct path loading
-	BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
-	if (!BaseMaterial)
+	// Also search in /Game root (broader search)
+	AssetDataList.Empty();
+	Filter.PackagePaths.Empty();
+	Filter.PackagePaths.Add(FName("/Game"));
+	AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
+	
+	for (const FAssetData& AssetData : AssetDataList)
 	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
+		FString AssetName = AssetData.AssetName.ToString();
+		if (AssetName.Contains(TEXT("ProceduralMeshTexture"), ESearchCase::IgnoreCase) ||
+			AssetName.Contains(TEXT("M_ProceduralMeshTexture"), ESearchCase::IgnoreCase))
+		{
+			BaseMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
+			if (BaseMaterial)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via AssetRegistry (broader search): %s"), *BaseMaterial->GetPathName());
+				return BaseMaterial;
+			}
+		}
 	}
+	
+	// Try direct path loading - prioritize the specific path the user wants
+	// First try: /Game/_GENERATED/Materials/M_ProceduralMeshTexture.M_ProceduralMeshTexture
+	BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
 	if (BaseMaterial)
 	{
 		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via direct path: %s"), *BaseMaterial->GetPathName());
 		return BaseMaterial;
 	}
 	
+	// Fallback paths (in case primary is not found)
+	if (!BaseMaterial)
+	{
+		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
+	}
+	if (!BaseMaterial)
+	{
+		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt2);
+	}
+	if (BaseMaterial)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via fallback path: %s"), *BaseMaterial->GetPathName());
+		return BaseMaterial;
+	}
+	
 	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find M_ProceduralMeshTexture material. Searched paths:"));
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
+	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s (PRIMARY)"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
 	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
+	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt2);
 	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Falling back to default materials..."));
 	
-	// Fallback to other materials
+	// Fallback to other materials (only if primary material not found)
+	// Note: These fallbacks are kept for compatibility but should rarely be needed
 	BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::VertexColorMaterialPathA);
 	if (!BaseMaterial)
 	{
@@ -1486,14 +1645,6 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 	if (!BaseMaterial)
 	{
 		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::EditorVertexColorMaterialPath);
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::BasicMaterialPath);
-	}
-	if (!BaseMaterial)
-	{
-		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::DefaultMaterialPath);
 	}
 
 #if WITH_EDITOR

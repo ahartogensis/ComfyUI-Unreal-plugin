@@ -3,7 +3,7 @@
 #include "ComfyFrameBundle.h"
 #include "ComfyFrameBuffer.generated.h"
 
-//Fires event when all 3 textures arrive (RGB, Depth, Mask)
+//Fires event when complete frame arrives (RGB and Mask required, Depth optional)
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnFullFrameReady, const FComfyFrame&, Frame);
 
@@ -12,7 +12,7 @@ class REALITYSTREAM_API UComfyFrameBuffer : public UObject
 {
     GENERATED_BODY()
 public:
-    //Event triggered when all 3 textures have been recieved 
+    //Event triggered when complete frame is ready (RGB and Mask required, Depth optional) 
     UPROPERTY(BlueprintAssignable)
     FOnFullFrameReady OnFullFrameReady;
 
@@ -21,5 +21,5 @@ public:
 
 private:
     FComfyFrame Frame;
-    int NextIndex = 0; //loop through the 3 textures (0=RGB, 1=Depth, 2=Mask)
+    int NextIndex = 0; //loop through textures (0=RGB, 1=Depth, 2=Mask) - Depth is optional
 };

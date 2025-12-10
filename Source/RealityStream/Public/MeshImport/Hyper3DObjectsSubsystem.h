@@ -41,6 +41,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void UpdateFromSplatDimensions();
 
+	// Set the ComfyStream actor location to avoid intersection (objects will be placed away from this location)
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
+	void SetComfyStreamExclusionZone(const FVector& ComfyStreamLocation);
+
+	// Automatically find and set ComfyStream actor exclusion zone (searches for AComfyStreamActor in the world)
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
+	void FindAndSetComfyStreamExclusionZone();
+
 protected:
 	virtual UWorld* GetWorld() const override;
 
@@ -162,11 +170,17 @@ private:
 	float BaseHeight = 0.f;  // Base height for objects
 	float HeightVariance = 100.f;  // Height variance for different heights
 	float MinSpacingDistance = 50.0f;  // Minimum distance between objects (in world units) to ensure spacing
-	float ImportScaleMultiplier = 50.0f; 
+	float ComfyStreamExclusionDistance = 100.0f;  // Minimum distance from ComfyStream actor to avoid intersection
+	float SplatPointExclusionDistance = 100.0f;  // Minimum distance from splat points to avoid intersection (increased from 50.0f)
+	float ImportScaleMultiplier = 25.0f;  // Reduced from 50.0f to make objects smaller
 	FRotator BaseMeshRotation = FRotator(0.f, 0.f, -90.f);
 
 	// Reference location for object positioning (defaults to origin)
 	FVector ReferenceLocation = FVector::ZeroVector;
+	
+	// ComfyStream actor location to avoid (set via SetComfyStreamExclusionZone)
+	FVector ComfyStreamExclusionLocation = FVector::ZeroVector;
+	bool bHasComfyStreamExclusion = false;  // Whether exclusion zone is set
 
 	bool bImportsActive = false;
 };

@@ -464,6 +464,8 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 	// If we got PNGs from this message, add them to accumulator
 	if (Pngs.Num() > 0)
 	{
+		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes, split into %d PNG(s)"), In.Num(), Pngs.Num());
+		
 		for (auto& Png : Pngs)
 		{
 			AccumulatedPngMessages.Add(MoveTemp(Png));
@@ -472,8 +474,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		MessagesSinceLastFrame++;
 		
 		// Log complete message with total accumulated count
-		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes (complete)"), In.Num());
-		UE_LOG(LogTemp, Display, TEXT("Total accumulated: %d"), AccumulatedPngMessages.Num());
+		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Total accumulated PNGs: %d (expecting %d)"), AccumulatedPngMessages.Num(), ExpectedPngCount);
 		
 		// Protection: If too many messages without completing a frame, clear accumulator
 		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
@@ -494,8 +495,8 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		// When we have all expected PNGs, process them in groups of 3
 		while (AccumulatedPngMessages.Num() >= ExpectedPngCount)
 		{
-			// Check for duplicate PNGs BEFORE assignment
-			bool bFoundDuplicates = false;
+			// Check for duplicate PNGs BEFORE assignment - remove only duplicates, not the whole group
+			TArray<int32> DuplicateIndices;
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
 				for (int32 j = i + 1; j < ExpectedPngCount; ++j)
@@ -506,25 +507,42 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 						                    AccumulatedPngMessages[j].GetData(), 
 						                    AccumulatedPngMessages[i].Num()) == 0)
 						{
-							bFoundDuplicates = true;
-							break;
+							// Mark duplicate (keep the first one, remove the second)
+							if (!DuplicateIndices.Contains(j))
+							{
+								DuplicateIndices.Add(j);
+							}
 						}
 					}
 				}
-				if (bFoundDuplicates) break;
 			}
 			
-			if (bFoundDuplicates)
+			// If we found duplicates, remove them and wait for more PNGs
+			if (DuplicateIndices.Num() > 0)
 			{
-				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
-				MessagesSinceLastFrame = 0;
-				continue;
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Found %d duplicate PNGs in accumulator, removing duplicates and waiting for more"), DuplicateIndices.Num());
+				// Remove duplicates in reverse order to maintain indices
+				DuplicateIndices.Sort([](const int32& A, const int32& B) { return A > B; });
+				for (int32 DupIdx : DuplicateIndices)
+				{
+					AccumulatedPngMessages.RemoveAt(DupIdx);
+				}
+				// Don't process yet - wait for more PNGs to arrive
+				break;
 			}
+			
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Processing %d PNGs from accumulator (total: %d)"), ExpectedPngCount, AccumulatedPngMessages.Num());
 			
 			// Identify PNGs by color type (most reliable), fallback to size-based assignment
 			TArray<int32> AssignedIndices;
 			AssignedIndices.SetNum(ExpectedPngCount);
 			AssignedIndices.Init(INDEX_NONE, ExpectedPngCount);
+			
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Processing %d PNGs, sizes: [%d, %d, %d]"), 
+				ExpectedPngCount,
+				AccumulatedPngMessages[0].Num(),
+				AccumulatedPngMessages[1].Num(),
+				AccumulatedPngMessages[2].Num());
 			
 			// Check color type for each PNG
 			TArray<bool> IsRGB;
@@ -542,20 +560,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 					RGBIndex = i;
 				}
 				
-				// Log color type detection for debugging
-				if (AccumulatedPngMessages[i].Num() >= 25)
-				{
-					const uint8 ColorType = AccumulatedPngMessages[i][25];
-					const FString ColorTypeName = 
-						ColorType == 0 ? TEXT("Grayscale") :
-						ColorType == 2 ? TEXT("RGB") :
-						ColorType == 3 ? TEXT("Indexed") :
-						ColorType == 4 ? TEXT("Grayscale+Alpha") :
-						ColorType == 6 ? TEXT("RGBA") :
-						FString::Printf(TEXT("Unknown(%d)"), ColorType);
-					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] PNG %d: ColorType=%d (%s), Size=%d bytes, IsRGB=%s"), 
-						i, ColorType, *ColorTypeName, AccumulatedPngMessages[i].Num(), IsRGB[i] ? TEXT("true") : TEXT("false"));
-				}
 			}
 				TArray<int32> SizeOrder;
 				for (int32 i = 0; i < ExpectedPngCount; ++i)
@@ -592,11 +596,42 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				if (AssignedIndices[i] == 1) DepthAccumIdx = i;
 			}
 			
-			if (RGBAccumIdx != INDEX_NONE && DepthAccumIdx != INDEX_NONE && RGBAccumIdx == DepthAccumIdx)
+			// Find Mask accumulator index
+			int32 MaskAccumIdx = INDEX_NONE;
+			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
+				if (AssignedIndices[i] == 2) MaskAccumIdx = i;
+			}
+			
+			// Log assignment results
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Assignment results: RGB=accum[%d], Depth=accum[%d], Mask=accum[%d]"), 
+				RGBAccumIdx, DepthAccumIdx, MaskAccumIdx);
+			
+			// Check if all 3 indices are assigned
+			bool bAllAssigned = true;
+			for (int32 i = 0; i < ExpectedPngCount; ++i)
+			{
+				if (AssignedIndices[i] == INDEX_NONE)
+				{
+					bAllAssigned = false;
+					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Accumulator index %d was not assigned to any channel!"), i);
+				}
+			}
+			
+			if (!bAllAssigned)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] Not all PNGs were assigned! Skipping this frame."));
 				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 				MessagesSinceLastFrame = 0;
-				return;
+				continue;
+			}
+			
+			if (RGBAccumIdx != INDEX_NONE && DepthAccumIdx != INDEX_NONE && RGBAccumIdx == DepthAccumIdx)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] RGB and Depth assigned to same accumulator index %d! Skipping frame."), RGBAccumIdx);
+				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+				MessagesSinceLastFrame = 0;
+				continue;
 			}
 			
 			// Decode all PNGs first, then broadcast in correct order (RGB, Depth, Mask)
@@ -604,11 +639,23 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			DecodedTextures.SetNum(ExpectedPngCount);
 			
 			// First pass: decode all PNGs
-			if (!PngDecoder) return;
+			if (!PngDecoder)
+			{
+				UE_LOG(LogTemp, Error, TEXT("[ComfyImageFetcher] PngDecoder is null, cannot decode PNGs"));
+				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
+				MessagesSinceLastFrame = 0;
+				continue;
+			}
+			
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
+				UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Decoding PNG %d (size: %d bytes)"), i, AccumulatedPngMessages[i].Num());
 				UTexture2D* Tex = PngDecoder->DecodePNGToTexture(AccumulatedPngMessages[i]);
 				DecodedTextures[i] = Tex;
+				if (!Tex)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Failed to decode PNG %d"), i);
+				}
 			}
 			
 			// Second pass: broadcast in correct order (RGB=0, Depth=1, Mask=2)
@@ -626,8 +673,15 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 					}
 				}
 				
-				if (AccumulatorIndex == INDEX_NONE || !DecodedTextures[AccumulatorIndex])
+				if (AccumulatorIndex == INDEX_NONE)
 				{
+					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] No accumulator index found for broadcast index %d (RGB=0, Depth=1, Mask=2)"), BroadcastIndex);
+					continue;
+				}
+				
+				if (!DecodedTextures[AccumulatorIndex])
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Decoded texture is null for accumulator index %d (broadcast index %d)"), AccumulatorIndex, BroadcastIndex);
 					continue;
 				}
 				
@@ -654,12 +708,22 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				SuccessfullyBroadcast++;
 			}
 			
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast %d/%d textures"), 
-				SuccessfullyBroadcast, ExpectedPngCount);
+			if (SuccessfullyBroadcast < ExpectedPngCount)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Only processed and broadcast %d/%d textures - some textures may be missing!"), 
+					SuccessfullyBroadcast, ExpectedPngCount);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast all %d textures"), SuccessfullyBroadcast);
+			}
 			
 			// Remove processed PNGs from accumulator
 			AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 			MessagesSinceLastFrame = 0;
+			
+			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Removed %d processed PNGs, remaining in accumulator: %d"), 
+				ExpectedPngCount, AccumulatedPngMessages.Num());
 		}
 	}
 }

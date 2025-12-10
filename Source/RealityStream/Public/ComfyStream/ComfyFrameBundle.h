@@ -14,6 +14,12 @@ struct FComfyFrame
 
     bool IsComplete() const
     {
-        return RGB && Depth && Mask;
+        // Frame is complete if we have RGB and Mask (Depth is optional)
+        return RGB && Mask;
+    }
+    
+    bool HasDepth() const
+    {
+        return Depth != nullptr;
     }
 };
