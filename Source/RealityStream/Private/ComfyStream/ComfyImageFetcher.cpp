@@ -440,16 +440,18 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		Payload = In;
 	}
 
-	// Check for PNG signature after the offset
-	if (Payload.Num() < 8 || 
-		Payload[0] != 0x89 || Payload[1] != 'P' || Payload[2] != 'N' || Payload[3] != 'G' ||
-		Payload[4] != 0x0D || Payload[5] != 0x0A || Payload[6] != 0x1A || Payload[7] != 0x0A)
-	{
-		return;
-	}
+	// // Check for PNG signature after the offset
+	// if (Payload.Num() < 8 || 
+	// 	Payload[0] != 0x89 || Payload[1] != 'P' || Payload[2] != 'N' || Payload[3] != 'G' ||
+	// 	Payload[4] != 0x0D || Payload[5] != 0x0A || Payload[6] != 0x1A || Payload[7] != 0x0A)
+	// {
+	// 	return;
+	// }
 
 	// Split concatenated PNGs
 	auto Pngs = SplitPNGStream(Payload);
+	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] SplitPNGStream found %d PNG(s)"), Pngs.Num());
+
 	
 	// If we got PNGs from this message, add them to accumulator
 	if (Pngs.Num() > 0)
@@ -591,6 +593,11 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			for (int32 i = 0; i < ExpectedPngCount; ++i)
 			{
 				UTexture2D* Tex = PngDecoder->DecodePNGToTexture(AccumulatedPngMessages[i]);
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] DecodePNGToTexture: Index %d, Size %d bytes, Success=%s"),
+        			i,
+          			AccumulatedPngMessages[i].Num(),
+            		Tex ? TEXT("YES") : TEXT("NO"));
+
 				DecodedTextures[i] = Tex;
 				
 				if (Tex)
@@ -661,6 +668,15 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				if (RGBIndex != INDEX_NONE && DecodedTextures[RGBIndex])
 				{
 					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting RGB texture (FrameBuffer index 0) - texture %d"), RGBIndex);
+					UE_LOG(LogTemp, Warning, TEXT(
+    					"[ComfyImageFetcher] Frame completed: RGB=%s  Depth=%s  Mask=%s  (Broadcasted=%d)"
+					),
+						AssignedIndices.Contains(0) ? TEXT("YES") : TEXT("NO"),
+						AssignedIndices.Contains(1) ? TEXT("YES") : TEXT("NO"),
+						AssignedIndices.Contains(2) ? TEXT("YES") : TEXT("NO"),
+						SuccessfullyBroadcast
+					);
+
 					OnTextureReceived.Broadcast(DecodedTextures[RGBIndex]);
 					SuccessfullyBroadcast++;
 				}
