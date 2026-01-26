@@ -51,6 +51,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Actor Spawning")
 	float FadeOutDuration = 0.5f;
 
+	//Frame interpolation settings
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation")
+	bool bEnableInterpolation = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation"))
+	int32 NumInterpolatedFrames = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation"))
+	float InterpolationDuration = 0.5f;
+
 	//Blueprint events 
 	UFUNCTION(BlueprintImplementableEvent)
 	void OnTextureReceived(UTexture2D* Texture);
@@ -75,6 +85,18 @@ private:
 
 	//Last frame that was actually applied to an actor (to prevent duplicate updates)
 	FComfyFrame LastAppliedFrame;
+
+	//Previous frame for interpolation
+	FComfyFrame PreviousFrame;
+
+	//Interpolation queue
+	struct FInterpolatedFrame
+	{
+		FComfyFrame Frame;
+		float TimeRemaining;
+	};
+	TArray<FInterpolatedFrame> InterpolationQueue;
+	float InterpolationTimer = 0.0f;
 
 	//sequence index for textures 
 	int32 SeqIndex = 0;
@@ -126,4 +148,9 @@ private:
 	
 	//Scale actor to match texture dimensions
 	void ScaleActorToTextureSize(AActor* Actor, const FComfyFrame& Frame);
+
+	//Frame interpolation functions
+	void GenerateInterpolatedFrames(const FComfyFrame& FromFrame, const FComfyFrame& ToFrame);
+	UTexture2D* BlendTextures(UTexture2D* TextureA, UTexture2D* TextureB, float Alpha);
+	void ApplyInterpolatedFrame(const FComfyFrame& Frame);
 };

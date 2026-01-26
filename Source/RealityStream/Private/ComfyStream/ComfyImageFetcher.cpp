@@ -348,8 +348,11 @@ static bool IsJsonOrText(const TArray<uint8>& Data, int32 StartOffset = 0)
 
 void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 {
+	UE_LOG(LogTemp, VeryVerbose, TEXT("[ComfyImageFetcher] ProcessImageData called with %d bytes"), In.Num());
+	
 	if (In.Num() < 4)
 	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Message too small (%d bytes), skipping"), In.Num());
 		return;
 	}
 
@@ -371,6 +374,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 	// Check if this is a JSON/text message (not PNG) - skip it
 	if (IsJsonOrText(In, Offset))
 	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Skipping JSON/text message (%d bytes)"), In.Num());
 		return;
 	}
 
@@ -443,6 +447,18 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 	// Split concatenated PNGs (SplitPNGStream will validate PNG signatures and return empty if none found)
 	auto Pngs = SplitPNGStream(Payload);
 	
+	// Log if no PNGs were found
+	if (Pngs.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] No valid PNGs found in message (%d bytes, offset=%d). Payload starts with: %02X %02X %02X %02X"), 
+			In.Num(), Offset, 
+			Payload.Num() > 0 ? Payload[0] : 0,
+			Payload.Num() > 1 ? Payload[1] : 0,
+			Payload.Num() > 2 ? Payload[2] : 0,
+			Payload.Num() > 3 ? Payload[3] : 0);
+		return;
+	}
+	
 	// If we got PNGs from this message, add them to accumulator
 	if (Pngs.Num() > 0)
 	{
@@ -460,6 +476,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		// Protection: If too many messages without completing a frame, clear accumulator
 		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Too many messages (%d) without completing frame, clearing accumulator"), MessagesSinceLastFrame);
 			AccumulatedPngMessages.Empty();
 			MessagesSinceLastFrame = 0;
 		}
@@ -468,6 +485,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		const int32 MaxAccumulatedPngs = ExpectedPngCount * 2;
 		if (AccumulatedPngMessages.Num() > MaxAccumulatedPngs)
 		{
+			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Accumulator too large (%d PNGs), resetting"), AccumulatedPngMessages.Num());
 			AccumulatedPngMessages.Empty();
 			MessagesSinceLastFrame = 0;
 			return;
@@ -498,6 +516,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			
 			if (bFoundDuplicates)
 			{
+				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Found duplicate PNGs, skipping frame"));
 				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 				MessagesSinceLastFrame = 0;
 				continue;
