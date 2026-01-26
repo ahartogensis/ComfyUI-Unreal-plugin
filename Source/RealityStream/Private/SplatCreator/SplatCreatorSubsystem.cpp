@@ -86,6 +86,14 @@ void USplatCreatorSubsystem::Deinitialize()
 	{
 		GetWorld()->GetTimerManager().ClearTimer(MorphTimer);
 	}
+	if (BobbingTimer.IsValid() && GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(BobbingTimer);
+	}
+	if (RandomMovementTimer.IsValid() && GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(RandomMovementTimer);
+	}
 	if (CurrentPointCloudActor)
 	{
 		CurrentPointCloudActor->Destroy();
@@ -153,6 +161,9 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 
 void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 {
+	// Reset all transformations to normal when loading a new PLY file
+	ResetToNormal();
+	
 	TArray<FVector> Positions;
 	TArray<FColor> Colors;
 	
@@ -583,6 +594,16 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	UWorld* World = GetWorld();
 	if (!World) return;
 	
+	// Stop all animations before creating new point cloud
+	if (bIsBobbing)
+	{
+		StopBobbing();
+	}
+	if (bIsRandomMoving)
+	{
+		StopRandomMovement();
+	}
+	
 	// Destroy old actor
 	if (CurrentPointCloudActor)
 	{
@@ -751,6 +772,9 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		CurrentPointPositions.Add(ScaledPos + DownOffset);
 	}
 	
+	// Store base positions for bobbing animation
+	BasePointPositions = CurrentPointPositions;
+	
 	// Verify SphereSizes is populated (it should be from CalculateAdaptiveSphereSizes call above)
 	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Stored %d point positions and %d sphere sizes for dense region detection"), 
 		CurrentPointPositions.Num(), SphereSizes.Num());
@@ -776,6 +800,11 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		// Store bounds for external access
 		CurrentSplatBounds = BoundingBox;
 		bHasSplatBounds = true;
+		
+		// Store center for scaling operations
+		SplatCenter = BoundingBox.GetCenter();
+		bHasSplatCenter = true;
+		SplatScaleMultiplier = 1.0f; // Reset scale when creating new point cloud
 		
 		FVector BoxSize = BoundingBox.GetSize();
 		FVector BoxCenter = BoundingBox.GetCenter();
@@ -974,6 +1003,14 @@ void USplatCreatorSubsystem::CompleteMorph()
 			// Store current positions for dense region detection
 			CurrentPointPositions = NewPositions;
 			
+			// Store base positions for bobbing animation
+			BasePointPositions = NewPositions;
+			
+			// Update center for scaling
+			SplatCenter = BoundingBox.GetCenter();
+			bHasSplatCenter = true;
+			SplatScaleMultiplier = 1.0f; // Reset scale when morph completes
+			
 			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated bounds after morph: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
 				BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
 				BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
@@ -982,6 +1019,147 @@ void USplatCreatorSubsystem::CompleteMorph()
 			OnSplatBoundsUpdated.Broadcast(BoundingBox);
 		}
 	}
+}
+
+// ============================================================
+// SPLAT SCALING SYSTEM
+// ============================================================
+
+void USplatCreatorSubsystem::ScaleSplat(float NewScaleMultiplier)
+{
+	if (!PointCloudComponent || BasePointPositions.Num() == 0 || !bHasSplatCenter)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot scale splat - no point cloud loaded or center not calculated"));
+		return;
+	}
+	
+	SplatScaleMultiplier = FMath::Clamp(NewScaleMultiplier, 0.1f, 5.0f);
+	UpdateSplatScale();
+}
+
+void USplatCreatorSubsystem::UpdateSplatScale()
+{
+	if (!PointCloudComponent || BasePointPositions.Num() == 0 || !bHasSplatCenter)
+	{
+		return;
+	}
+	
+	// If bobbing is active, the bobbing update will handle the scaling
+	// Otherwise, update positions directly
+	if (!bIsBobbing)
+	{
+		int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+		
+		// Update all instances with scaled positions and sizes
+		for (int32 i = 0; i < NumInstances; i++)
+		{
+			// Scale position relative to center
+			FVector BasePosition = BasePointPositions[i];
+			FVector OffsetFromCenter = BasePosition - SplatCenter;
+			FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+			FVector NewPosition = SplatCenter + ScaledOffset;
+			
+			// Scale sphere size proportionally
+			float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+			float ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+			
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				Transform.SetLocation(NewPosition);
+				Transform.SetScale3D(FVector(ScaledSphereSize));
+				PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			}
+		}
+		
+		// Update current positions
+		CurrentPointPositions.Empty();
+		CurrentPointPositions.Reserve(BasePointPositions.Num());
+		for (const FVector& BasePos : BasePointPositions)
+		{
+			FVector OffsetFromCenter = BasePos - SplatCenter;
+			FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+			CurrentPointPositions.Add(SplatCenter + ScaledOffset);
+		}
+		
+		PointCloudComponent->MarkRenderStateDirty();
+	}
+	// If bobbing is active, the next UpdateBobbing call will apply the new scale
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat scaled to %.2fx (center: %s)"), 
+		SplatScaleMultiplier, *SplatCenter.ToString());
+}
+
+void USplatCreatorSubsystem::ResetToNormal()
+{
+	// Stop all animations if active (no smooth interpolation when resetting)
+	if (bIsBobbing)
+	{
+		// Temporarily set scale to 1.0 so StopBobbing restores unscaled positions
+		float SavedScale = SplatScaleMultiplier;
+		SplatScaleMultiplier = 1.0f;
+		StopBobbing(false); // No interpolation when resetting
+		SplatScaleMultiplier = SavedScale; // Will be reset below
+	}
+	if (bIsRandomMoving)
+	{
+		StopRandomMovement(false); // No interpolation when resetting
+	}
+	
+	// Stop any active interpolation
+	if (bIsInterpolatingToBase)
+	{
+		bIsInterpolatingToBase = false;
+		InterpolationTime = 0.0f;
+		InterpolationStartPositions.Empty();
+		
+		UWorld* World = GetWorld();
+		if (World)
+		{
+			if (BobbingTimer.IsValid())
+			{
+				World->GetTimerManager().ClearTimer(BobbingTimer);
+			}
+			if (RandomMovementTimer.IsValid())
+			{
+				World->GetTimerManager().ClearTimer(RandomMovementTimer);
+			}
+		}
+	}
+	
+	// Reset all multipliers to normal
+	BobbingSpeedMultiplier = 1.0f;
+	SplatScaleMultiplier = 1.0f;
+	
+	// Restore positions to original unscaled positions if point cloud exists
+	if (PointCloudComponent && BasePointPositions.Num() > 0)
+	{
+		int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+		
+		for (int32 i = 0; i < NumInstances; i++)
+		{
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				// Restore to base position (unscaled, unbobbed)
+				Transform.SetLocation(BasePointPositions[i]);
+				
+				// Restore to base sphere size
+				float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+				Transform.SetScale3D(FVector(BaseSphereSize));
+				
+				PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			}
+		}
+		
+		// Update current positions to match base positions
+		CurrentPointPositions = BasePointPositions;
+		
+		PointCloudComponent->MarkRenderStateDirty();
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Reset to normal - all transformations cleared (scale: %.2f, speed: %.2f)"), 
+		SplatScaleMultiplier, BobbingSpeedMultiplier);
 }
 
 // ============================================================
@@ -1095,4 +1273,748 @@ bool USplatCreatorSubsystem::IsPositionTooCloseToSplatPoints(const FVector& Posi
 	}
 	
 	return false; // Position is far enough from all splat points
+}
+
+// ============================================================
+// OSC MESSAGE HANDLING AND BOBBING ANIMATION
+// ============================================================
+
+void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
+{
+	if (!PointCloudComponent || CurrentPointPositions.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot handle OSC message - no point cloud loaded"));
+		return;
+	}
+	
+	// Convert message to lowercase for case-insensitive matching
+	FString LowerMessage = Message.ToLower().TrimStartAndEnd();
+	
+	// Check for stop keyword first (stops all animations)
+	if (LowerMessage.Contains(TEXT("stop")))
+	{
+		StopBobbing(true); // Smooth interpolation
+		StopRandomMovement(true); // Smooth interpolation
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Stopping all animations"), *Message);
+		return;
+	}
+	// Check for random movement
+	else if (LowerMessage.Contains(TEXT("random")))
+	{
+		// Reset first when switching from bobbing to random
+		if (bIsBobbing)
+		{
+			StopBobbing(false); // No smooth interpolation when switching
+		}
+		StartRandomMovement();
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Starting random movement"), *Message);
+		return;
+	}
+	else if (LowerMessage.Contains(TEXT("faster")))
+	{
+		BobbingSpeedMultiplier = FMath::Clamp(BobbingSpeedMultiplier * 1.5f, 0.1f, 5.0f);
+		RandomMovementSpeedMultiplier = FMath::Clamp(RandomMovementSpeedMultiplier * 1.5f, 0.1f, 5.0f);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed multiplier: %.2f (bobbing), %.2f (random)"), 
+			*Message, BobbingSpeedMultiplier, RandomMovementSpeedMultiplier);
+		return;
+	}
+	else if (LowerMessage.Contains(TEXT("slower")))
+	{
+		BobbingSpeedMultiplier = FMath::Clamp(BobbingSpeedMultiplier * 0.67f, 0.1f, 5.0f);
+		RandomMovementSpeedMultiplier = FMath::Clamp(RandomMovementSpeedMultiplier * 0.67f, 0.1f, 5.0f);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed multiplier: %.2f (bobbing), %.2f (random)"), 
+			*Message, BobbingSpeedMultiplier, RandomMovementSpeedMultiplier);
+		return;
+	}
+	else if (LowerMessage.Contains(TEXT("normal")))
+	{
+		BobbingSpeedMultiplier = 1.0f;
+		RandomMovementSpeedMultiplier = 1.0f;
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed reset to normal (%.2f)"), 
+			*Message, BobbingSpeedMultiplier);
+		return;
+	}
+	else if (LowerMessage.Contains(TEXT("bigger")))
+	{
+		float NewScale = FMath::Clamp(SplatScaleMultiplier * 1.2f, 0.1f, 5.0f);
+		ScaleSplat(NewScale);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Scale multiplier: %.2f"), 
+			*Message, SplatScaleMultiplier);
+		return;
+	}
+	else if (LowerMessage.Contains(TEXT("smaller")))
+	{
+		float NewScale = FMath::Clamp(SplatScaleMultiplier * 0.83f, 0.1f, 5.0f);
+		ScaleSplat(NewScale);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Scale multiplier: %.2f"), 
+			*Message, SplatScaleMultiplier);
+		return;
+	}
+	
+	// Parse message for direction keywords
+	EBobbingDirection NewDirection = EBobbingDirection::None;
+	
+	if (LowerMessage.Contains(TEXT("up")))
+	{
+		NewDirection = EBobbingDirection::Up;
+	}
+	else if (LowerMessage.Contains(TEXT("down")))
+	{
+		NewDirection = EBobbingDirection::Down;
+	}
+	else if (LowerMessage.Contains(TEXT("left")))
+	{
+		NewDirection = EBobbingDirection::Left;
+	}
+	else if (LowerMessage.Contains(TEXT("right")))
+	{
+		NewDirection = EBobbingDirection::Right;
+	}
+	
+	if (NewDirection != EBobbingDirection::None)
+	{
+		// Reset first when switching from random to bobbing
+		if (bIsRandomMoving)
+		{
+			StopRandomMovement(false); // No smooth interpolation when switching
+		}
+		StartBobbing(NewDirection);
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Starting bobbing direction: %d (speed: %.2f)"), 
+			*Message, (int32)NewDirection, BobbingSpeedMultiplier);
+	}
+	else
+	{
+		// If message doesn't contain recognized keywords, ignore it (don't stop animations)
+		UE_LOG(LogTemp, Verbose, TEXT("[SplatCreator] OSC message received: '%s' -> No recognized keywords, ignoring"), *Message);
+	}
+}
+
+void USplatCreatorSubsystem::StartBobbing(EBobbingDirection Direction)
+{
+	if (!PointCloudComponent || BasePointPositions.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start bobbing - no base positions stored"));
+		return;
+	}
+	
+	// BasePointPositions should already be set from CreatePointCloud
+	// It always contains unscaled positions, which is what we want for bobbing
+	
+	CurrentBobbingDirection = Direction;
+	bIsBobbing = true;
+	BobbingTime = 0.0f;
+	BobbingSpeedMultiplier = 1.0f; // Reset speed multiplier when starting
+	
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		// Update bobbing at higher rate (120fps) for smoother animation
+		World->GetTimerManager().SetTimer(
+			BobbingTimer,
+			this,
+			&USplatCreatorSubsystem::UpdateBobbing,
+			0.008f, // ~120fps for smoother animation
+			true
+		);
+	}
+}
+
+void USplatCreatorSubsystem::UpdateBobbing()
+{
+	if (!bIsBobbing || !PointCloudComponent || BasePointPositions.Num() == 0)
+	{
+		return;
+	}
+	
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	
+	// Update bobbing time with speed multiplier
+	// Use fixed timestep for consistent animation regardless of frame rate
+	float DeltaTime = World->GetDeltaSeconds();
+	float CurrentSpeed = BaseBobbingSpeed * BobbingSpeedMultiplier;
+	BobbingTime += DeltaTime * CurrentSpeed;
+	
+	// Use smooth sine wave for natural bobbing motion
+	// Higher update rate (120fps) ensures smooth interpolation between frames
+	float Offset = FMath::Sin(BobbingTime * 2.0f * UE_PI) * BobbingAmplitude;
+	
+	FVector DirectionVector = FVector::ZeroVector;
+	switch (CurrentBobbingDirection)
+	{
+		case EBobbingDirection::Up:
+			DirectionVector = FVector(0.0f, 0.0f, 1.0f); // Up in Unreal (positive Z)
+			break;
+		case EBobbingDirection::Down:
+			DirectionVector = FVector(0.0f, 0.0f, -1.0f); // Down in Unreal (negative Z)
+			break;
+		case EBobbingDirection::Left:
+			DirectionVector = FVector(-1.0f, 0.0f, 0.0f); // Left (negative X)
+			break;
+		case EBobbingDirection::Right:
+			DirectionVector = FVector(1.0f, 0.0f, 0.0f); // Right (positive X)
+			break;
+		default:
+			return;
+	}
+	
+	FVector BobbingOffset = DirectionVector * Offset;
+	
+	// Update all instances each frame for smooth animation
+	// Update in batches to avoid frame drops, but complete all updates each frame
+	int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+	const int32 BatchSize = 5000;
+	
+	for (int32 BatchStart = 0; BatchStart < NumInstances; BatchStart += BatchSize)
+	{
+		int32 BatchEnd = FMath::Min(BatchStart + BatchSize, NumInstances);
+		
+		for (int32 i = BatchStart; i < BatchEnd; i++)
+		{
+			// Calculate bobbed position from base position
+			FVector BobbedBasePosition = BasePointPositions[i] + BobbingOffset;
+			
+			// Apply scaling relative to center if scale is not 1.0
+			FVector FinalPosition;
+			float ScaledSphereSize;
+			
+			if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+			{
+				// Scale the bobbed position relative to center
+				FVector OffsetFromCenter = BobbedBasePosition - SplatCenter;
+				FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+				FinalPosition = SplatCenter + ScaledOffset;
+				
+				// Scale sphere size
+				float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+				ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+			}
+			else
+			{
+				// No scaling, use bobbed position directly
+				FinalPosition = BobbedBasePosition;
+				ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+			}
+			
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				Transform.SetLocation(FinalPosition);
+				Transform.SetScale3D(FVector(ScaledSphereSize));
+				PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			}
+		}
+	}
+	
+	PointCloudComponent->MarkRenderStateDirty();
+}
+
+void USplatCreatorSubsystem::StopBobbing(bool bSmoothInterpolation)
+{
+	if (!bIsBobbing)
+	{
+		return;
+	}
+	
+	bIsBobbing = false;
+	CurrentBobbingDirection = EBobbingDirection::None;
+	BobbingTime = 0.0f;
+	
+	UWorld* World = GetWorld();
+	if (World && BobbingTimer.IsValid())
+	{
+		World->GetTimerManager().ClearTimer(BobbingTimer);
+	}
+	
+	if (bSmoothInterpolation && PointCloudComponent && BasePointPositions.Num() > 0)
+	{
+		// Start smooth interpolation back to base positions
+		int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+		InterpolationStartPositions.Empty();
+		InterpolationStartPositions.Reserve(NumInstances);
+		
+		// Store current positions as starting points for interpolation
+		for (int32 i = 0; i < NumInstances; i++)
+		{
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				InterpolationStartPositions.Add(Transform.GetLocation());
+			}
+			else
+			{
+				InterpolationStartPositions.Add(BasePointPositions[i]);
+			}
+		}
+		
+		bIsInterpolatingToBase = true;
+		InterpolationTime = 0.0f;
+		
+		// Start interpolation timer
+		if (World)
+		{
+			World->GetTimerManager().SetTimer(
+				BobbingTimer, // Reuse bobbing timer for interpolation
+				this,
+				&USplatCreatorSubsystem::UpdateInterpolationToBase,
+				0.016f, // ~60fps
+				true
+			);
+		}
+		
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bobbing stopped, starting smooth interpolation"));
+	}
+	else
+	{
+		// Immediate restore (no interpolation)
+		BobbingSpeedMultiplier = 1.0f; // Reset speed to normal when stopping
+		
+		if (PointCloudComponent && BasePointPositions.Num() > 0)
+		{
+			int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+			
+			for (int32 i = 0; i < NumInstances; i++)
+			{
+				FVector FinalPosition;
+				float ScaledSphereSize;
+				
+				// Apply scaling if scale is not 1.0
+				if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+				{
+					FVector OffsetFromCenter = BasePointPositions[i] - SplatCenter;
+					FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+					FinalPosition = SplatCenter + ScaledOffset;
+					
+					float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+					ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+				}
+				else
+				{
+					FinalPosition = BasePointPositions[i];
+					ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+				}
+				
+				FTransform Transform;
+				if (PointCloudComponent->GetInstanceTransform(i, Transform))
+				{
+					Transform.SetLocation(FinalPosition);
+					Transform.SetScale3D(FVector(ScaledSphereSize));
+					PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+				}
+			}
+			
+			PointCloudComponent->MarkRenderStateDirty();
+		}
+		
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bobbing stopped, positions restored immediately"));
+	}
+}
+
+// ============================================================
+// RANDOM MOVEMENT SYSTEM
+// ============================================================
+
+void USplatCreatorSubsystem::StartRandomMovement()
+{
+	if (!PointCloudComponent || BasePointPositions.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start random movement - no base positions stored"));
+		return;
+	}
+	
+	bIsRandomMoving = true;
+	RandomChangeTimer = 0.0f;
+	RandomMovementSpeedMultiplier = 1.0f; // Reset speed multiplier when starting
+	
+	// Initialize random velocities and targets for each sphere
+	int32 NumSpheres = BasePointPositions.Num();
+	RandomVelocities.Empty();
+	RandomTargets.Empty();
+	RandomCurrentPositions.Empty();
+	RandomVelocities.Reserve(NumSpheres);
+	RandomTargets.Reserve(NumSpheres);
+	RandomCurrentPositions.Reserve(NumSpheres);
+	
+	FRandomStream RandomStream(FMath::Rand());
+	
+	for (int32 i = 0; i < NumSpheres; i++)
+	{
+		// Start from base position
+		RandomCurrentPositions.Add(BasePointPositions[i]);
+		
+		// Generate random direction vector
+		FVector RandomDirection = FVector(
+			RandomStream.FRandRange(-1.0f, 1.0f),
+			RandomStream.FRandRange(-1.0f, 1.0f),
+			RandomStream.FRandRange(-1.0f, 1.0f)
+		).GetSafeNormal();
+		
+		// Random target position within radius from base position
+		float RandomDistance = RandomStream.FRandRange(0.0f, RandomMovementRadius);
+		FVector RandomTarget = BasePointPositions[i] + (RandomDirection * RandomDistance);
+		
+		RandomTargets.Add(RandomTarget);
+		
+		// Initial velocity towards target
+				FVector ToTarget = (RandomTarget - BasePointPositions[i]).GetSafeNormal();
+		float CurrentSpeed = BaseRandomMovementSpeed * RandomMovementSpeedMultiplier;
+		RandomVelocities.Add(ToTarget * CurrentSpeed);
+	}
+	
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		// Update random movement at 60fps for smooth animation
+		World->GetTimerManager().SetTimer(
+			RandomMovementTimer,
+			this,
+			&USplatCreatorSubsystem::UpdateRandomMovement,
+			0.016f, // ~60fps
+			true
+		);
+	}
+	
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Started random movement for %d spheres"), NumSpheres);
+}
+
+void USplatCreatorSubsystem::UpdateRandomMovement()
+{
+	if (!bIsRandomMoving || !PointCloudComponent || BasePointPositions.Num() == 0)
+	{
+		return;
+	}
+	
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	
+	float DeltaTime = World->GetDeltaSeconds();
+	RandomChangeTimer += DeltaTime;
+	
+	int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+	const int32 BatchSize = 5000;
+	
+	FRandomStream RandomStream(FMath::Rand());
+	
+	// Periodically change random directions
+	bool bShouldChangeDirections = (RandomChangeTimer >= RandomChangeInterval);
+	if (bShouldChangeDirections)
+	{
+		RandomChangeTimer = 0.0f;
+	}
+	
+	for (int32 BatchStart = 0; BatchStart < NumInstances; BatchStart += BatchSize)
+	{
+		int32 BatchEnd = FMath::Min(BatchStart + BatchSize, NumInstances);
+		
+		for (int32 i = BatchStart; i < BatchEnd; i++)
+		{
+			if (i >= RandomTargets.Num() || i >= RandomVelocities.Num() || i >= RandomCurrentPositions.Num())
+			{
+				continue;
+			}
+			
+			FVector CurrentPosition = RandomCurrentPositions[i];
+			FVector TargetPosition = RandomTargets[i];
+			FVector Velocity = RandomVelocities[i];
+			
+			// Periodically pick new random target
+			if (bShouldChangeDirections)
+			{
+				FVector RandomDirection = FVector(
+					RandomStream.FRandRange(-1.0f, 1.0f),
+					RandomStream.FRandRange(-1.0f, 1.0f),
+					RandomStream.FRandRange(-1.0f, 1.0f)
+				).GetSafeNormal();
+				
+				float RandomDistance = RandomStream.FRandRange(0.0f, RandomMovementRadius);
+				TargetPosition = BasePointPositions[i] + (RandomDirection * RandomDistance);
+				RandomTargets[i] = TargetPosition;
+				
+				FVector ToTarget = (TargetPosition - CurrentPosition).GetSafeNormal();
+				float CurrentSpeed = BaseRandomMovementSpeed * RandomMovementSpeedMultiplier;
+				Velocity = ToTarget * CurrentSpeed;
+				RandomVelocities[i] = Velocity;
+			}
+			else
+			{
+				// Update velocity towards target
+				FVector ToTarget = (TargetPosition - CurrentPosition);
+				float DistanceToTarget = ToTarget.Size();
+				float CurrentSpeed = BaseRandomMovementSpeed * RandomMovementSpeedMultiplier;
+				
+				if (DistanceToTarget > 1.0f)
+				{
+					Velocity = ToTarget.GetSafeNormal() * CurrentSpeed;
+					RandomVelocities[i] = Velocity;
+				}
+				else
+				{
+					// Reached target, pick new random target
+					FVector RandomDirection = FVector(
+						RandomStream.FRandRange(-1.0f, 1.0f),
+						RandomStream.FRandRange(-1.0f, 1.0f),
+						RandomStream.FRandRange(-1.0f, 1.0f)
+					).GetSafeNormal();
+					
+					float RandomDistance = RandomStream.FRandRange(0.0f, RandomMovementRadius);
+					TargetPosition = BasePointPositions[i] + (RandomDirection * RandomDistance);
+					RandomTargets[i] = TargetPosition;
+					
+					Velocity = (TargetPosition - CurrentPosition).GetSafeNormal() * CurrentSpeed;
+					RandomVelocities[i] = Velocity;
+				}
+			}
+			
+			// Move sphere towards target
+			FVector NewPosition = CurrentPosition + (Velocity * DeltaTime);
+			
+			// Clamp to radius from base position
+			FVector OffsetFromBase = NewPosition - BasePointPositions[i];
+			float DistanceFromBase = OffsetFromBase.Size();
+			if (DistanceFromBase > RandomMovementRadius)
+			{
+				NewPosition = BasePointPositions[i] + (OffsetFromBase.GetSafeNormal() * RandomMovementRadius);
+			}
+			
+			// Update current position
+			RandomCurrentPositions[i] = NewPosition;
+			
+			// Apply scaling if scale is not 1.0
+			FVector FinalPosition;
+			float ScaledSphereSize;
+			
+			if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+			{
+				// Scale the random position relative to center
+				FVector OffsetFromCenter = NewPosition - SplatCenter;
+				FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+				FinalPosition = SplatCenter + ScaledOffset;
+				
+				float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+				ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+			}
+			else
+			{
+				FinalPosition = NewPosition;
+				ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+			}
+			
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				Transform.SetLocation(FinalPosition);
+				Transform.SetScale3D(FVector(ScaledSphereSize));
+				PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			}
+		}
+	}
+	
+	PointCloudComponent->MarkRenderStateDirty();
+}
+
+void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
+{
+	if (!bIsRandomMoving)
+	{
+		return;
+	}
+	
+	bIsRandomMoving = false;
+	RandomChangeTimer = 0.0f;
+	
+	UWorld* World = GetWorld();
+	if (World && RandomMovementTimer.IsValid())
+	{
+		World->GetTimerManager().ClearTimer(RandomMovementTimer);
+	}
+	
+	if (bSmoothInterpolation && PointCloudComponent && BasePointPositions.Num() > 0)
+	{
+		// Start smooth interpolation back to base positions
+		int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+		InterpolationStartPositions.Empty();
+		InterpolationStartPositions.Reserve(NumInstances);
+		
+		// Store current positions as starting points for interpolation
+		for (int32 i = 0; i < NumInstances; i++)
+		{
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				InterpolationStartPositions.Add(Transform.GetLocation());
+			}
+			else
+			{
+				InterpolationStartPositions.Add(BasePointPositions[i]);
+			}
+		}
+		
+		bIsInterpolatingToBase = true;
+		InterpolationTime = 0.0f;
+		
+		// Start interpolation timer
+		if (World)
+		{
+			World->GetTimerManager().SetTimer(
+				RandomMovementTimer, // Reuse random movement timer for interpolation
+				this,
+				&USplatCreatorSubsystem::UpdateInterpolationToBase,
+				0.016f, // ~60fps
+				true
+			);
+		}
+		
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Random movement stopped, starting smooth interpolation"));
+	}
+	else
+	{
+		// Immediate restore (no interpolation)
+		RandomMovementSpeedMultiplier = 1.0f; // Reset speed to normal when stopping
+		
+		if (PointCloudComponent && BasePointPositions.Num() > 0)
+		{
+			int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+			
+			for (int32 i = 0; i < NumInstances; i++)
+			{
+				FVector FinalPosition;
+				float ScaledSphereSize;
+				
+				// Apply scaling if scale is not 1.0
+				if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+				{
+					FVector OffsetFromCenter = BasePointPositions[i] - SplatCenter;
+					FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+					FinalPosition = SplatCenter + ScaledOffset;
+					
+					float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+					ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+				}
+				else
+				{
+					FinalPosition = BasePointPositions[i];
+					ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+				}
+				
+				FTransform Transform;
+				if (PointCloudComponent->GetInstanceTransform(i, Transform))
+				{
+					Transform.SetLocation(FinalPosition);
+					Transform.SetScale3D(FVector(ScaledSphereSize));
+					PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+				}
+			}
+			
+			PointCloudComponent->MarkRenderStateDirty();
+		}
+		
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Random movement stopped, positions restored immediately"));
+	}
+	
+	RandomVelocities.Empty();
+	RandomTargets.Empty();
+	RandomCurrentPositions.Empty();
+}
+
+void USplatCreatorSubsystem::UpdateInterpolationToBase()
+{
+	if (!bIsInterpolatingToBase || !PointCloudComponent || BasePointPositions.Num() == 0)
+	{
+		return;
+	}
+	
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	
+	float DeltaTime = World->GetDeltaSeconds();
+	InterpolationTime += DeltaTime;
+	
+	float Alpha = FMath::Clamp(InterpolationTime / InterpolationDuration, 0.0f, 1.0f);
+	
+	// Smooth easing function (ease-in-out cubic)
+	float EasedAlpha = Alpha < 0.5f
+		? 4.0f * Alpha * Alpha * Alpha
+		: 1.0f - FMath::Pow(-2.0f * Alpha + 2.0f, 3.0f) / 2.0f;
+	
+	int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+	const int32 BatchSize = 5000;
+	
+	for (int32 BatchStart = 0; BatchStart < NumInstances; BatchStart += BatchSize)
+	{
+		int32 BatchEnd = FMath::Min(BatchStart + BatchSize, NumInstances);
+		
+		for (int32 i = BatchStart; i < BatchEnd; i++)
+		{
+			if (i >= InterpolationStartPositions.Num())
+			{
+				continue;
+			}
+			
+			// Calculate target position (base position with scaling applied)
+			FVector TargetPosition;
+			float ScaledSphereSize;
+			
+			if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+			{
+				FVector OffsetFromCenter = BasePointPositions[i] - SplatCenter;
+				FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
+				TargetPosition = SplatCenter + ScaledOffset;
+				
+				float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+				ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+			}
+			else
+			{
+				TargetPosition = BasePointPositions[i];
+				ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+			}
+			
+			// Interpolate from start position to target position
+			FVector StartPosition = InterpolationStartPositions[i];
+			FVector InterpolatedPosition = FMath::Lerp(StartPosition, TargetPosition, EasedAlpha);
+			
+			FTransform Transform;
+			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			{
+				Transform.SetLocation(InterpolatedPosition);
+				Transform.SetScale3D(FVector(ScaledSphereSize));
+				PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+			}
+		}
+	}
+	
+	PointCloudComponent->MarkRenderStateDirty();
+	
+	// Check if interpolation is complete
+	if (Alpha >= 1.0f)
+	{
+		bIsInterpolatingToBase = false;
+		InterpolationTime = 0.0f;
+		InterpolationStartPositions.Empty();
+		
+		UWorld* WorldPtr = GetWorld();
+		if (WorldPtr)
+		{
+			// Clear both timers in case either was used for interpolation
+			if (BobbingTimer.IsValid())
+			{
+				WorldPtr->GetTimerManager().ClearTimer(BobbingTimer);
+			}
+			if (RandomMovementTimer.IsValid())
+			{
+				WorldPtr->GetTimerManager().ClearTimer(RandomMovementTimer);
+			}
+		}
+		
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Interpolation to base positions completed"));
+	}
 }
