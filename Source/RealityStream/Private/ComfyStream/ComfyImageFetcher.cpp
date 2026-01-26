@@ -86,7 +86,7 @@ static bool IsPngRGB(const TArray<uint8>& PngData)
 	// Need: [len:4][IHDR:4][data:13][crc:4] = 25 bytes minimum
 	if (N < 25) return false;
 	
-	// Check IHDR chunk (bytes 8-11 should be length 0x0000000D = 13, bytes 12-15 should be "IHDR")
+	// // Check IHDR chunk (bytes 8-11 should be length 0x0000000D = 13, bytes 12-15 should be "IHDR")
 	if (PngData[8] != 0 || PngData[9] != 0 || PngData[10] != 0 || PngData[11] != 0x0D) return false;
 	if (PngData[12] != 'I' || PngData[13] != 'H' || PngData[14] != 'D' || PngData[15] != 'R') return false;
 	
@@ -440,15 +440,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		Payload = In;
 	}
 
-	// Check for PNG signature after the offset
-	if (Payload.Num() < 8 || 
-		Payload[0] != 0x89 || Payload[1] != 'P' || Payload[2] != 'N' || Payload[3] != 'G' ||
-		Payload[4] != 0x0D || Payload[5] != 0x0A || Payload[6] != 0x1A || Payload[7] != 0x0A)
-	{
-		return;
-	}
-
-	// Split concatenated PNGs
+	// Split concatenated PNGs (SplitPNGStream will validate PNG signatures and return empty if none found)
 	auto Pngs = SplitPNGStream(Payload);
 	
 	// If we got PNGs from this message, add them to accumulator
