@@ -2,6 +2,7 @@
 #include "HAL/UnrealMemory.h"
 #include "Misc/AssertionMacros.h"
 
+int debug = 0; 
 //receives textures and pairs them into a single frame
 // Expected order from ComfyUI: RGB (Index 0), Depth (Index 1, optional), Mask (Index 2)
 // Frame is complete when RGB and Mask are present (Depth is optional)
@@ -10,7 +11,7 @@ void UComfyFrameBuffer::PushTexture(UTexture2D* Tex, int Index)
 	// Validate texture is valid before assigning
 	if (!Tex || !IsValid(Tex))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyFrameBuffer] Received invalid texture at index %d"), Index);
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyFrameBuffer] Received invalid texture at index %d"), Index);
 		return;
 	}
 
@@ -37,7 +38,7 @@ void UComfyFrameBuffer::PushTexture(UTexture2D* Tex, int Index)
 	// Both RGB and Mask must be valid (not null) for frame to be complete
 	if (Frame.RGB && Frame.Mask && IsValid(Frame.RGB) && IsValid(Frame.Mask))
 	{
-		UE_LOG(LogTemp, Display, TEXT("[ComfyFrameBuffer] Frame complete (RGB + Mask). TextureCount=%d, Index=%d"), TextureCount, Index);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyFrameBuffer] Frame complete (RGB + Mask). TextureCount=%d, Index=%d"), TextureCount, Index);
 		FComfyFrame CompleteFrame = Frame; // Copy frame before reset
 		Reset(); // Reset immediately so next frame starts clean
 		OnFullFrameReady.Broadcast(CompleteFrame); // Broadcast after reset
@@ -47,7 +48,7 @@ void UComfyFrameBuffer::PushTexture(UTexture2D* Tex, int Index)
 	{
 		if (Frame.IsComplete())
 		{
-			UE_LOG(LogTemp, Display, TEXT("[ComfyFrameBuffer] Frame complete (RGB + Depth + Mask). TextureCount=%d"), TextureCount);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyFrameBuffer] Frame complete (RGB + Depth + Mask). TextureCount=%d"), TextureCount);
 			OnFullFrameReady.Broadcast(Frame);
 			Reset();
 			TextureCount = 0;

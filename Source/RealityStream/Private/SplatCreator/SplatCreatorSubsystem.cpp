@@ -16,6 +16,8 @@
 #include "Math/RandomStream.h"
 #include "Math/Box.h"
 
+int debug = 0; //0 = off, 1 = on
+
 
 // ============================================================
 // Initialize
@@ -24,7 +26,7 @@
 void USplatCreatorSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem initialized"));
+   	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Subsystem initialized"));
 }
 
 
@@ -36,28 +38,28 @@ void USplatCreatorSubsystem::StartPointCloudSystem()
 {
 	if (bIsInitialized)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Already initialized"));
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Already initialized"));
 		return;
 	}
 	
 	UWorld* World = GetWorld();
 	if (!World)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Cannot start - no world available"));
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Cannot start - no world available"));
 		return;
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Starting point cloud system..."));
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Starting point cloud system..."));
 	
 	ScanForPLYFiles();
 	
 	if (PlyFiles.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No PLY files found in %s"), *GetSplatCreatorFolder());
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No PLY files found in %s"), *GetSplatCreatorFolder());
 		return;
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files"), PlyFiles.Num());
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files"), PlyFiles.Num());
 	
 	// Load first PLY file
 	FString FirstPLYPath = GetSplatCreatorFolder() / PlyFiles[0];
@@ -71,28 +73,30 @@ void USplatCreatorSubsystem::StartPointCloudSystem()
 		45.0f,
 		true
 	);
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every 45 seconds"));
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every 45 seconds"));
 	
 	bIsInitialized = true;
 }
 
 void USplatCreatorSubsystem::Deinitialize()
 {
-	if (CycleTimer.IsValid() && GetWorld())
+	UWorld* World = GetWorld();
+	//make GetWorld() pointer 
+	if (CycleTimer.IsValid() && World)
 	{
-		GetWorld()->GetTimerManager().ClearTimer(CycleTimer);
+		World->GetTimerManager().ClearTimer(CycleTimer);
 	}
-	if (MorphTimer.IsValid() && GetWorld())
+	if (MorphTimer.IsValid() && World)
 	{
-		GetWorld()->GetTimerManager().ClearTimer(MorphTimer);
+		World->GetTimerManager().ClearTimer(MorphTimer);
 	}
-	if (BobbingTimer.IsValid() && GetWorld())
+	if (BobbingTimer.IsValid() && World)
 	{
-		GetWorld()->GetTimerManager().ClearTimer(BobbingTimer);
+		World->GetTimerManager().ClearTimer(BobbingTimer);
 	}
-	if (RandomMovementTimer.IsValid() && GetWorld())
+	if (RandomMovementTimer.IsValid() && World)
 	{
-		GetWorld()->GetTimerManager().ClearTimer(RandomMovementTimer);
+		World->GetTimerManager().ClearTimer(RandomMovementTimer);
 	}
 	if (CurrentPointCloudActor)
 	{
@@ -121,19 +125,19 @@ void USplatCreatorSubsystem::ScanForPLYFiles()
 	FString AbsolutePath = FPaths::ConvertRelativePathToFull(SplatCreatorDir);
 	FPaths::NormalizeDirectoryName(AbsolutePath);
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Scanning for PLY files in: %s"), *AbsolutePath);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Scanning for PLY files in: %s"), *AbsolutePath);
 	
 	// Check if directory exists
 	if (!FPaths::DirectoryExists(AbsolutePath))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Directory does not exist: %s"), *AbsolutePath);
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Directory does not exist: %s"), *AbsolutePath);
 		return;
 	}
 	
 	IFileManager::Get().FindFiles(PlyFiles, *(AbsolutePath / TEXT("*.ply")), true, false);
 	PlyFiles.Sort();
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files in %s"), PlyFiles.Num(), *AbsolutePath);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files in %s"), PlyFiles.Num(), *AbsolutePath);
 }
 
 // ============================================================
@@ -151,7 +155,7 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 	CurrentFileIndex = (CurrentFileIndex + 1) % PlyFiles.Num();
 	FString PLYPath = GetSplatCreatorFolder() / PlyFiles[CurrentFileIndex];
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycling to PLY: %s"), *PlyFiles[CurrentFileIndex]);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycling to PLY: %s"), *PlyFiles[CurrentFileIndex]);
 	LoadPLYFile(PLYPath);
 }
 
@@ -169,25 +173,11 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 	
 	if (!ParsePLYFile(PLYPath, Positions, Colors))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to parse PLY file: %s"), *PLYPath);
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to parse PLY file: %s"), *PLYPath);
             return;
         }
 
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed %d points from %s"), Positions.Num(), *PLYPath);
-	
-	// Log coordinate ranges for debugging
-	if (Positions.Num() > 0)
-	{
-		FVector MinBounds = Positions[0];
-		FVector MaxBounds = Positions[0];
-		for (const FVector& Pos : Positions)
-		{
-			MinBounds = MinBounds.ComponentMin(Pos);
-			MaxBounds = MaxBounds.ComponentMax(Pos);
-		}
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Coordinate range: Min(%s) Max(%s)"), 
-			*MinBounds.ToString(), *MaxBounds.ToString());
-	}
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed %d points from %s"), Positions.Num(), *PLYPath);
 	
 	// Uniformly sample points to limit count for performance
 	TArray<FVector> FilteredPositions;
@@ -198,11 +188,11 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 	{
 		Positions = FilteredPositions;
 		Colors = FilteredColors;
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] After filtering: %d points"), Positions.Num());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] After filtering: %d points"), Positions.Num());
         }
         else
         {
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Filtering removed all points, using original"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Filtering removed all points, using original"));
 	}
 
 	// Create or morph point cloud
@@ -244,13 +234,9 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 		if (UWorld* World = GetWorld())
 		{
 			MorphStartTime = World->GetTimeSeconds();
-    World->GetTimerManager().SetTimer(
-				MorphTimer,
-        this,
-				&USplatCreatorSubsystem::UpdateMorph,
+    		World->GetTimerManager().SetTimer(MorphTimer,this,&USplatCreatorSubsystem::UpdateMorph,
 				0.033f, // ~30fps update rate for better performance
-        true
-    );
+				true);
         }
     }
     else
@@ -463,7 +449,7 @@ void USplatCreatorSubsystem::SamplePointsUniformly(const TArray<FVector>& InPosi
 		// Keep all points if under limit
 		OutPositions = InPositions;
 		OutColors = InColors;
-		UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Keeping all %d points (under limit)"), InPositions.Num());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Keeping all %d points (under limit)"), InPositions.Num());
 		return;
 	}
 	
@@ -493,7 +479,7 @@ void USplatCreatorSubsystem::SamplePointsUniformly(const TArray<FVector>& InPosi
 		}
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Uniform sampling: %d -> %d points (step: %d)"), 
+	if (debug) UE_LOG(LogTemp, Display, TEXT("[SamplePoints] Uniform sampling: %d -> %d points (step: %d)"), 
 		InPositions.Num(), OutPositions.Num(), Step);
 }
 
@@ -517,7 +503,7 @@ void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>&
 	// Increased to account for scaled positions (125x scaling)
 	const float SearchRadius = 10.0f;
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculating adaptive sphere sizes for %d points (SearchRadius=%.1f)..."), NumPoints, SearchRadius);
+	if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculating adaptive sphere sizes for %d points (SearchRadius=%.1f)..."), NumPoints, SearchRadius);
 	
 	// For each point, find nearest neighbor and calculate adaptive size
 	for (int32 i = 0; i < NumPoints; i++)
@@ -585,7 +571,7 @@ void USplatCreatorSubsystem::CalculateAdaptiveSphereSizes(const TArray<FVector>&
 		OutSphereSizes.Add(FMath::Clamp(SphereSize, MinCubeSize, MaxCubeSize));
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated adaptive sphere sizes: min=%.3f, max=%.3f"), 
+	if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated adaptive sphere sizes: min=%.3f, max=%.3f"), 
 		MinCubeSize, MaxCubeSize);
 }
 
@@ -649,14 +635,11 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	PointCloudComponent->bUseAsOccluder = false;
 	PointCloudComponent->SetTranslucentSortPriority(1); // Higher priority for better sorting
 	
-	// Try to reduce HISM's internal culling aggressiveness
-	// Note: HISM uses an octree structure internally, and reducing instance count helps
-	
 	// Set material to see colors
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
 	if (!Material)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Material M_VertexColor not found at /Game/_GENERATED/Materials/, trying fallback"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Material M_VertexColor not found at /Game/_GENERATED/Materials/, trying fallback"));
 		Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
 	}
 	if (Material)
@@ -692,17 +675,17 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 			DynamicMaterial->SetScalarParameterValue(TEXT("Vibrance"), 1.3f);
 			
 			PointCloudComponent->SetMaterial(0, DynamicMaterial);
-			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created Material Instance Dynamic with emissive and contrast properties"));
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created Material Instance Dynamic with emissive and contrast properties"));
 		}
 		else
 		{
 			PointCloudComponent->SetMaterial(0, Material);
-			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set material: %s (failed to create MID)"), *Material->GetName());
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set material: %s (failed to create MID)"), *Material->GetName());
 		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to load material"));
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to load material"));
 	}
 	
 	// Set component as root BEFORE registering (critical for proper bounds calculation)
@@ -726,13 +709,13 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		ScaledPositions.Add(Pos * 125.0f);
 	}
 	CalculateAdaptiveSphereSizes(ScaledPositions, SphereSizes);
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated %d sphere sizes for dense region detection"), SphereSizes.Num());
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated %d sphere sizes for dense region detection"), SphereSizes.Num());
 	
 	// Add instances in batches
 	int32 NumInstances = FMath::Min(Positions.Num(), Colors.Num());
 	const int32 BatchSize = 5000;
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Adding %d instances in batches of %d..."), NumInstances, BatchSize);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Adding %d instances in batches of %d..."), NumInstances, BatchSize);
 	
 	for (int32 BatchStart = 0; BatchStart < NumInstances; BatchStart += BatchSize)
 	{
@@ -758,7 +741,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		
 		if (BatchEnd % 50000 == 0 || BatchEnd >= NumInstances)
 		{
-			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Added %d / %d instances..."), BatchEnd, NumInstances);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Added %d / %d instances..."), BatchEnd, NumInstances);
 		}
 	}
 	
@@ -776,7 +759,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	BasePointPositions = CurrentPointPositions;
 	
 	// Verify SphereSizes is populated (it should be from CalculateAdaptiveSphereSizes call above)
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Stored %d point positions and %d sphere sizes for dense region detection"), 
+	if(debug) (LogTemp, Display, TEXT("[SplatCreator] Stored %d point positions and %d sphere sizes for dense region detection"), 
 		CurrentPointPositions.Num(), SphereSizes.Num());
 	
 	// Force update bounds after all instances are added (critical for preventing culling)
@@ -808,10 +791,10 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		
 		FVector BoxSize = BoundingBox.GetSize();
 		FVector BoxCenter = BoundingBox.GetCenter();
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set explicit bounds: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set explicit bounds: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
 			BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
 			BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bounds size: X=%.1f, Y=%.1f, Z=%.1f, Center: (%.1f, %.1f, %.1f)"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bounds size: X=%.1f, Y=%.1f, Z=%.1f, Center: (%.1f, %.1f, %.1f)"), 
 			BoxSize.X, BoxSize.Y, BoxSize.Z, BoxCenter.X, BoxCenter.Y, BoxCenter.Z);
 		
 		// Notify other subsystems that bounds have been updated (CurrentPointPositions is now stored)
@@ -819,7 +802,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot calculate bounds - CurrentPointPositions is empty"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot calculate bounds - CurrentPointPositions is empty"));
 	}
 	
 	// Final visibility and culling overrides
@@ -841,7 +824,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	
 	// Store sphere sizes for morphing (already calculated above)
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created point cloud with %d spheres"), NumInstances);
+	if(debug)(LogTemp, Display, TEXT("[SplatCreator] Created point cloud with %d spheres"), NumInstances);
 }
 
 
@@ -957,9 +940,10 @@ void USplatCreatorSubsystem::UpdateMorph()
 
 void USplatCreatorSubsystem::CompleteMorph()
 {
-	if (MorphTimer.IsValid() && GetWorld())
+	UWorld* World = GetWorld();
+	if (MorphTimer.IsValid() && World)
 	{
-		GetWorld()->GetTimerManager().ClearTimer(MorphTimer);
+		World->GetTimerManager().ClearTimer(MorphTimer);
 	}
 	
 	bIsMorphing = false;
@@ -967,9 +951,10 @@ void USplatCreatorSubsystem::CompleteMorph()
 	MorphUpdateIndex = 0;
 	
 	// Ensure final state
-	if (PointCloudComponent && NewPositions.Num() > 0)
+	int32 NumInstances = NewPositions.Num();
+	if (PointCloudComponent && NumInstances > 0)
 	{
-		for (int32 i = 0; i < NewPositions.Num() && i < PointCloudComponent->GetInstanceCount(); i++)
+		for (int32 i = 0; i < NumInstances && i < PointCloudComponent->GetInstanceCount(); i++)
 		{
 			FTransform Transform;
 			Transform.SetLocation(NewPositions[i]);
@@ -1011,7 +996,7 @@ void USplatCreatorSubsystem::CompleteMorph()
 			bHasSplatCenter = true;
 			SplatScaleMultiplier = 1.0f; // Reset scale when morph completes
 			
-			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated bounds after morph: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated bounds after morph: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
 				BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
 				BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
 			
@@ -1086,7 +1071,7 @@ void USplatCreatorSubsystem::UpdateSplatScale()
 	}
 	// If bobbing is active, the next UpdateBobbing call will apply the new scale
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat scaled to %.2fx (center: %s)"), 
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat scaled to %.2fx (center: %s)"), 
 		SplatScaleMultiplier, *SplatCenter.ToString());
 }
 
@@ -1158,7 +1143,7 @@ void USplatCreatorSubsystem::ResetToNormal()
 		PointCloudComponent->MarkRenderStateDirty();
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Reset to normal - all transformations cleared (scale: %.2f, speed: %.2f)"), 
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Reset to normal - all transformations cleared (scale: %.2f, speed: %.2f)"), 
 		SplatScaleMultiplier, BobbingSpeedMultiplier);
 }
 
@@ -1170,14 +1155,14 @@ FVector2D USplatCreatorSubsystem::GetSplatDimensions() const
 {
 	if (!bHasSplatBounds)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning default (200x200)"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning default (200x200)"));
 		return FVector2D(200.0f, 200.0f);
 	}
 	
 	FVector BoxSize = CurrentSplatBounds.GetSize();
 	FVector2D Dimensions(BoxSize.X, BoxSize.Y);
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat dimensions: X=%.1f, Y=%.1f"), Dimensions.X, Dimensions.Y);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat dimensions: X=%.1f, Y=%.1f"), Dimensions.X, Dimensions.Y);
 	return Dimensions;
 }
 
@@ -1185,12 +1170,12 @@ FVector USplatCreatorSubsystem::GetSplatCenter() const
 {
 	if (!bHasSplatBounds)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning origin"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning origin"));
 		return FVector::ZeroVector;
 	}
 	
 	FVector Center = CurrentSplatBounds.GetCenter();
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s"), *Center.ToString());
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s"), *Center.ToString());
 	return Center;
 }
 
@@ -1198,7 +1183,7 @@ FBox USplatCreatorSubsystem::GetSplatBounds() const
 {
 	if (!bHasSplatBounds)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning empty box"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning empty box"));
 		return FBox(ForceInit);
 	}
 	
@@ -1211,7 +1196,7 @@ TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThresh
 	
 	if (CurrentPointPositions.Num() == 0 || SphereSizes.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No point positions or sphere sizes available (Positions: %d, SphereSizes: %d)"), 
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No point positions or sphere sizes available (Positions: %d, SphereSizes: %d)"), 
 			CurrentPointPositions.Num(), SphereSizes.Num());
 		return DenseRegions;
 	}
@@ -1232,7 +1217,7 @@ TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThresh
 		}
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d dense points out of %d total (sphere size threshold: %.3f)"), 
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d dense points out of %d total (sphere size threshold: %.3f)"), 
 		DenseCount, CurrentPointPositions.Num(), MaxDenseSphereSize);
 	
 	return DenseRegions;
@@ -1295,7 +1280,7 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 	{
 		StopBobbing(true); // Smooth interpolation
 		StopRandomMovement(true); // Smooth interpolation
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Stopping all animations"), *Message);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Stopping all animations"), *Message);
 		return;
 	}
 	// Check for random movement
@@ -1307,14 +1292,14 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 			StopBobbing(false); // No smooth interpolation when switching
 		}
 		StartRandomMovement();
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Starting random movement"), *Message);
+		if(debug) (LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Starting random movement"), *Message);
 		return;
 	}
 	else if (LowerMessage.Contains(TEXT("faster")))
 	{
 		BobbingSpeedMultiplier = FMath::Clamp(BobbingSpeedMultiplier * 1.5f, 0.1f, 5.0f);
 		RandomMovementSpeedMultiplier = FMath::Clamp(RandomMovementSpeedMultiplier * 1.5f, 0.1f, 5.0f);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed multiplier: %.2f (bobbing), %.2f (random)"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed multiplier: %.2f (bobbing), %.2f (random)"), 
 			*Message, BobbingSpeedMultiplier, RandomMovementSpeedMultiplier);
 		return;
 	}
@@ -1322,7 +1307,7 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 	{
 		BobbingSpeedMultiplier = FMath::Clamp(BobbingSpeedMultiplier * 0.67f, 0.1f, 5.0f);
 		RandomMovementSpeedMultiplier = FMath::Clamp(RandomMovementSpeedMultiplier * 0.67f, 0.1f, 5.0f);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed multiplier: %.2f (bobbing), %.2f (random)"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed multiplier: %.2f (bobbing), %.2f (random)"), 
 			*Message, BobbingSpeedMultiplier, RandomMovementSpeedMultiplier);
 		return;
 	}
@@ -1330,7 +1315,7 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 	{
 		BobbingSpeedMultiplier = 1.0f;
 		RandomMovementSpeedMultiplier = 1.0f;
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed reset to normal (%.2f)"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Speed reset to normal (%.2f)"), 
 			*Message, BobbingSpeedMultiplier);
 		return;
 	}
@@ -1338,7 +1323,7 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 	{
 		float NewScale = FMath::Clamp(SplatScaleMultiplier * 1.2f, 0.1f, 5.0f);
 		ScaleSplat(NewScale);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Scale multiplier: %.2f"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Scale multiplier: %.2f"), 
 			*Message, SplatScaleMultiplier);
 		return;
 	}
@@ -1346,7 +1331,7 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 	{
 		float NewScale = FMath::Clamp(SplatScaleMultiplier * 0.83f, 0.1f, 5.0f);
 		ScaleSplat(NewScale);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Scale multiplier: %.2f"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Scale multiplier: %.2f"), 
 			*Message, SplatScaleMultiplier);
 		return;
 	}
@@ -1379,13 +1364,13 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 			StopRandomMovement(false); // No smooth interpolation when switching
 		}
 		StartBobbing(NewDirection);
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Starting bobbing direction: %d (speed: %.2f)"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] OSC message received: '%s' -> Starting bobbing direction: %d (speed: %.2f)"), 
 			*Message, (int32)NewDirection, BobbingSpeedMultiplier);
 	}
 	else
 	{
 		// If message doesn't contain recognized keywords, ignore it (don't stop animations)
-		UE_LOG(LogTemp, Verbose, TEXT("[SplatCreator] OSC message received: '%s' -> No recognized keywords, ignoring"), *Message);
+		if(debug) UE_LOG(LogTemp, Verbose, TEXT("[SplatCreator] OSC message received: '%s' -> No recognized keywords, ignoring"), *Message);
 	}
 }
 
@@ -1393,7 +1378,7 @@ void USplatCreatorSubsystem::StartBobbing(EBobbingDirection Direction)
 {
 	if (!PointCloudComponent || BasePointPositions.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start bobbing - no base positions stored"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start bobbing - no base positions stored"));
 		return;
 	}
 	
@@ -1564,8 +1549,6 @@ void USplatCreatorSubsystem::StopBobbing(bool bSmoothInterpolation)
 				true
 			);
 		}
-		
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bobbing stopped, starting smooth interpolation"));
 	}
 	else
 	{
@@ -1609,7 +1592,6 @@ void USplatCreatorSubsystem::StopBobbing(bool bSmoothInterpolation)
 			PointCloudComponent->MarkRenderStateDirty();
 		}
 		
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Bobbing stopped, positions restored immediately"));
 	}
 }
 
@@ -1621,7 +1603,7 @@ void USplatCreatorSubsystem::StartRandomMovement()
 {
 	if (!PointCloudComponent || BasePointPositions.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start random movement - no base positions stored"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot start random movement - no base positions stored"));
 		return;
 	}
 	
@@ -1676,8 +1658,6 @@ void USplatCreatorSubsystem::StartRandomMovement()
 			true
 		);
 	}
-	
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Started random movement for %d spheres"), NumSpheres);
 }
 
 void USplatCreatorSubsystem::UpdateRandomMovement()
@@ -1870,7 +1850,6 @@ void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
 			);
 		}
 		
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Random movement stopped, starting smooth interpolation"));
 	}
 	else
 	{
@@ -1914,7 +1893,6 @@ void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
 			PointCloudComponent->MarkRenderStateDirty();
 		}
 		
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Random movement stopped, positions restored immediately"));
 	}
 	
 	RandomVelocities.Empty();
@@ -2001,20 +1979,18 @@ void USplatCreatorSubsystem::UpdateInterpolationToBase()
 		InterpolationTime = 0.0f;
 		InterpolationStartPositions.Empty();
 		
-		UWorld* WorldPtr = GetWorld();
-		if (WorldPtr)
+		UWorld* World = GetWorld();
+		if (World)
 		{
 			// Clear both timers in case either was used for interpolation
 			if (BobbingTimer.IsValid())
 			{
-				WorldPtr->GetTimerManager().ClearTimer(BobbingTimer);
+				World->GetTimerManager().ClearTimer(BobbingTimer);
 			}
 			if (RandomMovementTimer.IsValid())
 			{
-				WorldPtr->GetTimerManager().ClearTimer(RandomMovementTimer);
+				World->GetTimerManager().ClearTimer(RandomMovementTimer);
 			}
 		}
-		
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Interpolation to base positions completed"));
 	}
 }

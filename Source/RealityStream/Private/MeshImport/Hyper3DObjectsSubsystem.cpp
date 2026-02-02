@@ -61,6 +61,7 @@ namespace Hyper3DObjectsImport
 	}
 }
 
+int debug = 0; //0 = off, 1 = on
 
 // ============================================================
 // Initialize
@@ -69,7 +70,7 @@ void UHyper3DObjectsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Subsystem initialized"));
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Subsystem initialized"));
 
 	PostWorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddUObject(
 		this, &UHyper3DObjectsSubsystem::HandlePostWorldInit);
@@ -112,7 +113,7 @@ void UHyper3DObjectsSubsystem::Deinitialize()
 	CachedWorld.Reset();
 	bImportsActive = false;
 
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Subsystem deinitialized"));
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Subsystem deinitialized"));
 
 	Super::Deinitialize();
 }
@@ -139,7 +140,7 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 	UWorld* World = GetWorld();
 	if (!World)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Cannot activate imports - no valid world"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Cannot activate imports - no valid world"));
 		return;
 	}
 
@@ -172,7 +173,7 @@ void UHyper3DObjectsSubsystem::UpdateFromSplatDimensions()
 			if (BoxSizeVector.Size() < 1.0f)
 			{
 				// Splat bounds not available yet - will be updated when OnSplatBoundsUpdated is called
-				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Splat bounds not available yet, waiting for splat to load..."));
+				if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Splat bounds not available yet, waiting for splat to load..."));
 				return;
 			}
 
@@ -201,7 +202,7 @@ void UHyper3DObjectsSubsystem::UpdateFromSplatDimensions()
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] SplatCreatorSubsystem not found, using default BoxSize: %.1f"), BoxSize);
+			if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] SplatCreatorSubsystem not found, using default BoxSize: %.1f"), BoxSize);
 		}
 	}
 }
@@ -232,7 +233,7 @@ void UHyper3DObjectsSubsystem::DeactivateObjectImports()
 void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLocation)
 {
 	ReferenceLocation = InReferenceLocation;
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Reference location set to: %s"), *ReferenceLocation.ToString());
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Reference location set to: %s"), *ReferenceLocation.ToString());
 	
 	// Update object positions immediately if objects are already spawned
 	if (bImportsActive)
@@ -245,7 +246,7 @@ void UHyper3DObjectsSubsystem::SetComfyStreamExclusionZone(const FVector& ComfyS
 {
 	ComfyStreamExclusionLocation = ComfyStreamLocation;
 	bHasComfyStreamExclusion = true;
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] ComfyStream exclusion zone set at: %s (exclusion distance: %.1f)"), 
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] ComfyStream exclusion zone set at: %s (exclusion distance: %.1f)"), 
 		*ComfyStreamExclusionLocation.ToString(), ComfyStreamExclusionDistance);
 	
 	// Update object layout to avoid the exclusion zone if objects are already spawned
@@ -261,7 +262,7 @@ void UHyper3DObjectsSubsystem::FindAndSetComfyStreamExclusionZone()
 	UWorld* World = GetWorld();
 	if (!World)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Cannot find ComfyStream actor - no world available"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Cannot find ComfyStream actor - no world available"));
 		return;
 	}
 
@@ -271,7 +272,7 @@ void UHyper3DObjectsSubsystem::FindAndSetComfyStreamExclusionZone()
 
 	if (FoundActors.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No ComfyStreamActor found in the world"));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No ComfyStreamActor found in the world"));
 		bHasComfyStreamExclusion = false;
 		return;
 	}
@@ -280,7 +281,7 @@ void UHyper3DObjectsSubsystem::FindAndSetComfyStreamExclusionZone()
 	AActor* ComfyStreamActor = FoundActors[0];
 	FVector ComfyStreamLocation = ComfyStreamActor->GetActorLocation();
 	
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found ComfyStreamActor at: %s"), *ComfyStreamLocation.ToString());
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found ComfyStreamActor at: %s"), *ComfyStreamLocation.ToString());
 	SetComfyStreamExclusionZone(ComfyStreamLocation);
 }
 
@@ -288,17 +289,17 @@ void UHyper3DObjectsSubsystem::SetTotalInstances(int32 InTotalInstances)
 {
 	int32 OldValue = TotalInstances;
 	TotalInstances = FMath::Max(1, InTotalInstances); // Ensure at least 1
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Total instances changed from %d to %d (will be randomly distributed across all OBJ files)"), OldValue, TotalInstances);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Total instances changed from %d to %d (will be randomly distributed across all OBJ files)"), OldValue, TotalInstances);
 	
 	// Refresh objects to spawn/remove instances as needed
 	if (bImportsActive)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Refreshing objects to update instance count..."));
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Refreshing objects to update instance count..."));
 		RefreshObjects();
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Imports are not active. Call ActivateObjectImports() first to see the changes."));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Imports are not active. Call ActivateObjectImports() first to see the changes."));
 	}
 }
 
@@ -416,7 +417,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 	const FString ImportDir = GetImportDirectory();
 	if (!FPaths::DirectoryExists(ImportDir))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] MeshImport directory not found: %s"), *ImportDir);
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] MeshImport directory not found: %s"), *ImportDir);
 		return;
 	}
 
@@ -488,14 +489,14 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 	}
 	
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found %d OBJ files, current total instances: %d, target: %d"), 
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found %d OBJ files, current total instances: %d, target: %d"), 
 		DesiredPathList.Num(), CurrentTotalInstances, TotalInstances);
 
 	// Remove excess instances if we have too many (remove randomly)
 	if (CurrentTotalInstances > TotalInstances)
 	{
 		int32 InstancesToRemove = CurrentTotalInstances - TotalInstances;
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Removing %d excess instances"), InstancesToRemove);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Removing %d excess instances"), InstancesToRemove);
 		
 		FRandomStream RandomStream(FDateTime::Now().GetTicks());
 		TArray<int32> ValidIndices;
@@ -520,7 +521,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 	else if (CurrentTotalInstances < TotalInstances && DesiredPathList.Num() > 0)
 	{
 		int32 InstancesToSpawn = TotalInstances - CurrentTotalInstances;
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Need to spawn %d more instances (randomly distributed)"), InstancesToSpawn);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Need to spawn %d more instances (randomly distributed)"), InstancesToSpawn);
 		
 		// Ensure all OBJ files are cached
 		for (const FString& FullPath : DesiredPathList)
@@ -537,7 +538,7 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 					NewCache.TextureSet = ResolveAllTexturesForOBJ(FullPath, MtlFile);
 					NewCache.bIsValid = true;
 					MeshDataCache.Add(FullPath, NewCache);
-					UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Cached OBJ data for %s"), *FPaths::GetCleanFilename(FullPath));
+					if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Cached OBJ data for %s"), *FPaths::GetCleanFilename(FullPath));
 				}
 			}
 		}
@@ -550,11 +551,11 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		FRandomStream RandomStream(FDateTime::Now().GetTicks());
 		
 		// Log current distribution
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Current distribution:"));
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Current distribution:"));
 		for (const FString& ObjPath : DesiredPathList)
 		{
 			int32 Count = ObjInstanceCounts.FindRef(ObjPath);
-			UE_LOG(LogTemp, Display, TEXT("  %s: %d instances"), *FPaths::GetCleanFilename(ObjPath), Count);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("  %s: %d instances"), *FPaths::GetCleanFilename(ObjPath), Count);
 		}
 		
 		for (int32 i = 0; i < SpawnCount; ++i)
@@ -589,12 +590,12 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 					{
 						// Update count for this OBJ file immediately so next selection is informed
 						ObjInstanceCounts.FindOrAdd(SelectedObjPath)++;
-						UE_LOG(LogTemp, Verbose, TEXT("[Hyper3DObjects] Spawned instance %d/%d from %s (now has %d instances)"), 
+						if(debug) UE_LOG(LogTemp, Verbose, TEXT("[Hyper3DObjects] Spawned instance %d/%d from %s (now has %d instances)"), 
 							i + 1, SpawnCount, *FPaths::GetCleanFilename(SelectedObjPath), ObjInstanceCounts.FindRef(SelectedObjPath));
 					}
 					else
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
+					if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to spawn instance from %s"), *FPaths::GetCleanFilename(SelectedObjPath));
 				}
 				
 				// Yield to game thread every few spawns to prevent freezing
@@ -607,16 +608,16 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		}
 		
 		// Log final distribution
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Final distribution after spawning:"));
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Final distribution after spawning:"));
 		for (const FString& ObjPath : DesiredPathList)
 		{
 			int32 Count = ObjInstanceCounts.FindRef(ObjPath);
-			UE_LOG(LogTemp, Display, TEXT("  %s: %d instances"), *FPaths::GetCleanFilename(ObjPath), Count);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("  %s: %d instances"), *FPaths::GetCleanFilename(ObjPath), Count);
 		}
 		
 		if (SpawnCount < InstancesToSpawn)
 		{
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Spawned %d/%d instances this cycle. Will complete %d remaining in next refresh cycle."), 
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Spawned %d/%d instances this cycle. Will complete %d remaining in next refresh cycle."), 
 				SpawnCount, InstancesToSpawn, InstancesToSpawn - SpawnCount);
 		}
 	}
@@ -733,7 +734,7 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 			// This ensures all objects get placed
 			if (!bFoundValidPosition)
 			{
-				UE_LOG(LogTemp, Verbose, TEXT("[Hyper3DObjects] Could not find ideal position for object %d after %d attempts. Using best available position."), 
+				if(debug) UE_LOG(LogTemp, Verbose, TEXT("[Hyper3DObjects] Could not find ideal position for object %d after %d attempts. Using best available position."), 
 					Index, MaxAttempts);
 			}
 			
@@ -752,7 +753,7 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 			);
 		}
 	
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in %.1fx%.1f box centered at ReferenceLocation"), 
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in %.1fx%.1f box centered at ReferenceLocation"), 
 		Count, BoxSize, BoxSize);
 }
 
@@ -816,19 +817,19 @@ bool UHyper3DObjectsSubsystem::SpawnObjectGroupFromOBJ(const FString& ObjPath)
 	TArray<FVector2D> UVs;
 	TArray<FColor> Colors;
 
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Loading OBJ file: %s"), *FPaths::GetCleanFilename(ObjPath));
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Loading OBJ file: %s"), *FPaths::GetCleanFilename(ObjPath));
 	if (!LoadOBJ(ObjPath, Vertices, Triangles, Normals, UVs, Colors, MtlFile))
 	{
 		return false;
 	}
 	double LoadOBJTime = FPlatformTime::Seconds();
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] LoadOBJ took %.3f seconds, loaded %d vertices, %d triangles"), 
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] LoadOBJ took %.3f seconds, loaded %d vertices, %d triangles"), 
 		LoadOBJTime - StartTime, Vertices.Num(), Triangles.Num() / 3);
 
 	// Resolve all textures for this OBJ
 	FTextureSet TextureSet = ResolveAllTexturesForOBJ(ObjPath, MtlFile);
 	double TextureTime = FPlatformTime::Seconds();
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Texture resolution took %.3f seconds"), TextureTime - LoadOBJTime);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Texture resolution took %.3f seconds"), TextureTime - LoadOBJTime);
 	
 	// Load all textures
 	AActor* ObjectActor = CreateObjectActor(ObjPath, TextureSet);
@@ -882,7 +883,7 @@ bool UHyper3DObjectsSubsystem::SpawnObjectGroupFromOBJ(const FString& ObjPath)
 	if (TextureSet.Shaded) LoadedTextures.Add(TextureSet.Shaded);
 
 	double TotalTime = FPlatformTime::Seconds() - StartTime;
-	UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Total spawn time: %.3f seconds for %s"), TotalTime, *FPaths::GetCleanFilename(ObjPath));
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Total spawn time: %.3f seconds for %s"), TotalTime, *FPaths::GetCleanFilename(ObjPath));
 
 	return true;
 }
@@ -975,7 +976,7 @@ AActor* UHyper3DObjectsSubsystem::CreateObjectActor(const FString& ObjPath, FTex
 			return nullptr;
 		}
 
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Loading texture from: %s"), *TexturePath);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Loading texture from: %s"), *TexturePath);
 		
 		UTexture2D* Texture = nullptr;
 #if WITH_EDITOR
@@ -990,12 +991,12 @@ AActor* UHyper3DObjectsSubsystem::CreateObjectActor(const FString& ObjPath, FTex
 		
 		if (Texture)
 		{
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Successfully loaded texture: %s (Size: %dx%d)"), 
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Successfully loaded texture: %s (Size: %dx%d)"), 
 				*Texture->GetName(), Texture->GetSizeX(), Texture->GetSizeY());
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to load texture from: %s"), *TexturePath);
+			if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to load texture from: %s"), *TexturePath);
 		}
 		
 		return Texture;
@@ -1229,7 +1230,7 @@ bool UHyper3DObjectsSubsystem::LoadOBJ(
 
 				if (!Positions.IsValidIndex(Idx.Position))
 				{
-					UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Invalid position index in OBJ: %s"), *ObjPath);
+					if(debug)(LogTemp, Warning, TEXT("[Hyper3DObjects] Invalid position index in OBJ: %s"), *ObjPath);
 					return false;
 				}
 
@@ -1399,11 +1400,11 @@ FString UHyper3DObjectsSubsystem::FindFallbackTexture(const FString& ObjPath) co
 		const FString Candidate = Directory / (BaseName + Extension);
 		if (FPaths::FileExists(Candidate))
 		{
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found texture matching OBJ name: %s"), *Candidate);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found texture matching OBJ name: %s"), *Candidate);
 			return Candidate;
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No texture found for OBJ: %s"), *ObjPath);
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] No texture found for OBJ: %s"), *ObjPath);
 	return FString();
 }
 
@@ -1424,7 +1425,7 @@ UTexture2D* UHyper3DObjectsSubsystem::ImportTextureAsAsset(const FString& Textur
 	UTexture2D* ExistingTexture = LoadObject<UTexture2D>(nullptr, *TargetAssetPath);
 	if (ExistingTexture)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Using existing texture asset: %s"), *TargetAssetPath);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Using existing texture asset: %s"), *TargetAssetPath);
 		return ExistingTexture;
 	}
 
@@ -1451,12 +1452,12 @@ UTexture2D* UHyper3DObjectsSubsystem::ImportTextureAsAsset(const FString& Textur
 			ImportedTexture->MarkPackageDirty();
 			FAssetRegistryModule::AssetCreated(ImportedTexture);
 
-			UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Successfully imported texture as asset: %s"), *TargetAssetPath);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Successfully imported texture as asset: %s"), *TargetAssetPath);
 			return ImportedTexture;
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to import texture as asset: %s"), *TexturePath);
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to import texture as asset: %s"), *TexturePath);
 	return nullptr;
 #else
 	return nullptr;
@@ -1560,7 +1561,7 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 	BaseMaterial = Cast<UMaterialInterface>(SpecificMaterialPath.TryLoad());
 	if (BaseMaterial)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via SoftObjectPath at specific path: %s"), *BaseMaterial->GetPathName());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via SoftObjectPath at specific path: %s"), *BaseMaterial->GetPathName());
 		return BaseMaterial;
 	}
 	
@@ -1585,7 +1586,7 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 			BaseMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
 			if (BaseMaterial)
 			{
-				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via AssetRegistry: %s"), *BaseMaterial->GetPathName());
+				if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via AssetRegistry: %s"), *BaseMaterial->GetPathName());
 				return BaseMaterial;
 			}
 		}
@@ -1606,7 +1607,7 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 			BaseMaterial = Cast<UMaterialInterface>(AssetData.GetAsset());
 			if (BaseMaterial)
 			{
-				UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via AssetRegistry (broader search): %s"), *BaseMaterial->GetPathName());
+				if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via AssetRegistry (broader search): %s"), *BaseMaterial->GetPathName());
 				return BaseMaterial;
 			}
 		}
@@ -1617,7 +1618,7 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 	BaseMaterial = LoadObject<UMaterialInterface>(nullptr, Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
 	if (BaseMaterial)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via direct path: %s"), *BaseMaterial->GetPathName());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via direct path: %s"), *BaseMaterial->GetPathName());
 		return BaseMaterial;
 	}
 	
@@ -1632,15 +1633,15 @@ UMaterialInterface* UHyper3DObjectsSubsystem::GetOrCreateBaseMaterial() const
 	}
 	if (BaseMaterial)
 	{
-		UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via fallback path: %s"), *BaseMaterial->GetPathName());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Found user's material via fallback path: %s"), *BaseMaterial->GetPathName());
 		return BaseMaterial;
 	}
 	
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find M_ProceduralMeshTexture material. Searched paths:"));
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s (PRIMARY)"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt2);
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Falling back to default materials..."));
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find M_ProceduralMeshTexture material. Searched paths:"));
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s (PRIMARY)"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPath);
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt);
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects]   - %s"), Hyper3DObjectsImport::ProceduralMeshTextureMaterialPathAlt2);
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Falling back to default materials..."));
 	
 	// Fallback to other materials (only if primary material not found)
 	// Note: These fallbacks are kept for compatibility but should rarely be needed
@@ -1676,7 +1677,7 @@ UMaterial* UHyper3DObjectsSubsystem::CreateMaterialWithTextureParameters() const
 	// - Metallic (Texture2D Parameter)
 	// - Roughness (Texture2D Parameter)
 	
-	UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Material creation not implemented. Please create a material manually with texture parameters: BaseColor, Normal, Metallic, Roughness"));
+	if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Material creation not implemented. Please create a material manually with texture parameters: BaseColor, Normal, Metallic, Roughness"));
 	return nullptr;
 }
 #endif
@@ -1697,13 +1698,13 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 
 	if (!BaseMaterial)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find any base material. Trying to use default engine material."));
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not find any base material. Trying to use default engine material."));
 		// Last resort: try to find any material in the engine
 		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/EngineMaterials/DefaultMaterial"));
 		
 		if (!BaseMaterial)
 		{
-			UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] No materials available. Mesh will be untextured."));
+			if(debug) UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] No materials available. Mesh will be untextured."));
 			return;
 		}
 	}
@@ -1723,10 +1724,10 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 	
 	if (AvailableTextureParams.Num() == 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] WARNING: The base material has no texture parameters! Textures cannot be applied."));
-		UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] Please create a material with texture parameters (BaseColor, Normal, Metallic, Roughness) and set it as the base material."));
-		UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] The material path being used is: %s"), BaseMaterial ? *BaseMaterial->GetPathName() : TEXT("None"));
-		UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] Material name: %s"), BaseMaterial ? *BaseMaterial->GetName() : TEXT("None"));
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] WARNING: The base material has no texture parameters! Textures cannot be applied."));
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] Please create a material with texture parameters (BaseColor, Normal, Metallic, Roughness) and set it as the base material."));
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] The material path being used is: %s"), BaseMaterial ? *BaseMaterial->GetPathName() : TEXT("None"));
+		if(debug) UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] Material name: %s"), BaseMaterial ? *BaseMaterial->GetName() : TEXT("None"));
 	}
 
 	// Helper function to find and set texture parameter
@@ -1760,7 +1761,7 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 			return true; // Assume it worked
 		}
 
-		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not apply %s texture - no matching parameter found"), *TextureType);
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Could not apply %s texture - no matching parameter found"), *TextureType);
 		return false;
 	};
 
@@ -1824,7 +1825,7 @@ FString UHyper3DObjectsSubsystem::GetImportDirectory() const
 	}
 
 	// Fallback to explicit path provided by the user (absolute path)
-	return TEXT("C:/Users/alexi/OneDrive/Documents/Unreal Projects/Reconstruction_3D/Plugins/RealityStream/MeshImport");
+	return Null;
 }
 
 void UHyper3DObjectsSubsystem::DestroyAllObjects()

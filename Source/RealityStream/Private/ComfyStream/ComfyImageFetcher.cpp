@@ -10,6 +10,8 @@
 #include "Engine/Texture2D.h"
 #include "Math/UnrealMathUtility.h"
 
+int debug = 0;
+
 UComfyImageFetcher::UComfyImageFetcher()
 {
 	Config = FComfyStreamConfig();
@@ -34,7 +36,7 @@ void UComfyImageFetcher::StartPolling(const FString& ServerURL, int32 ChannelNum
 	SetConnectionStatus(EComfyConnectionStatus::Connecting);
 
 	FString WebSocketURL = BuildWebSocketURL(ServerURL, ChannelNumber);
-	UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Connecting to %s"), *WebSocketURL);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Connecting to %s"), *WebSocketURL);
 
 	WebSocket = FWebSocketsModule::Get().CreateWebSocket(WebSocketURL);
 
@@ -232,7 +234,7 @@ void UComfyImageFetcher::OnWebSocketConnected()
 
 void UComfyImageFetcher::OnWebSocketConnected_GameThread()
 {
-	UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket connected to channel %d"), CurrentChannel);
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket connected to channel %d"), CurrentChannel);
 	SetConnectionStatus(EComfyConnectionStatus::Connected);
 }
 
@@ -265,7 +267,7 @@ void UComfyImageFetcher::OnWebSocketClosed_GameThread(int32 StatusCode, const FS
 
 void UComfyImageFetcher::OnWebSocketMessageSent(const FString& MessageString)
 {
-	UE_LOG(LogTemp, VeryVerbose, TEXT("[ComfyImageFetcher] Message sent: %s"), *MessageString);
+	if(debug) UE_LOG(LogTemp, VeryVerbose, TEXT("[ComfyImageFetcher] Message sent: %s"), *MessageString);
 }
 
 void UComfyImageFetcher::SetConnectionStatus(EComfyConnectionStatus NewStatus)
@@ -294,7 +296,7 @@ void UComfyImageFetcher::OnWebSocketMessage(const void* Data, SIZE_T Size, SIZE_
 		if (BytesRemaining > 0)
 		{
 			bReceivingChunks = true;
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message chunk received: %llu bytes, %llu remaining"), Size, BytesRemaining);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message chunk received: %llu bytes, %llu remaining"), Size, BytesRemaining);
 			return;
 		}
 
@@ -348,11 +350,11 @@ static bool IsJsonOrText(const TArray<uint8>& Data, int32 StartOffset = 0)
 
 void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 {
-	UE_LOG(LogTemp, VeryVerbose, TEXT("[ComfyImageFetcher] ProcessImageData called with %d bytes"), In.Num());
+	if(debug) UE_LOG(LogTemp, VeryVerbose, TEXT("[ComfyImageFetcher] ProcessImageData called with %d bytes"), In.Num());
 	
 	if (In.Num() < 4)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Message too small (%d bytes), skipping"), In.Num());
+		if(debug) UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Message too small (%d bytes), skipping"), In.Num());
 		return;
 	}
 
@@ -374,10 +376,12 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 	// Check if this is a JSON/text message (not PNG) - skip it
 	if (IsJsonOrText(In, Offset))
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Skipping JSON/text message (%d bytes)"), In.Num());
+		if(debug) UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Skipping JSON/text message (%d bytes)"), In.Num());
 		return;
 	}
 
+	//CHECK IF NEED THIS
+	//_________________________________
 	// Handle optional tiny JSON preamble `{...}\n` (older WebViewer "meta")
 	if (In.Num() > Offset && In[Offset] == '{')
 	{
@@ -450,7 +454,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 	// Log if no PNGs were found
 	if (Pngs.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] No valid PNGs found in message (%d bytes, offset=%d). Payload starts with: %02X %02X %02X %02X"), 
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] No valid PNGs found in message (%d bytes, offset=%d). Payload starts with: %02X %02X %02X %02X"), 
 			In.Num(), Offset, 
 			Payload.Num() > 0 ? Payload[0] : 0,
 			Payload.Num() > 1 ? Payload[1] : 0,
@@ -470,13 +474,13 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		MessagesSinceLastFrame++;
 		
 		// Log complete message with total accumulated count
-		UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes (complete)"), In.Num());
-		UE_LOG(LogTemp, Display, TEXT("Total accumulated: %d"), AccumulatedPngMessages.Num());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] WebSocket message received: %d bytes (complete)"), In.Num());
+		if(debug) UE_LOG(LogTemp, Display, TEXT("Total accumulated: %d"), AccumulatedPngMessages.Num());
 		
 		// Protection: If too many messages without completing a frame, clear accumulator
 		if (MessagesSinceLastFrame >= MaxMessagesBeforeClear)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Too many messages (%d) without completing frame, clearing accumulator"), MessagesSinceLastFrame);
+			if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Too many messages (%d) without completing frame, clearing accumulator"), MessagesSinceLastFrame);
 			AccumulatedPngMessages.Empty();
 			MessagesSinceLastFrame = 0;
 		}
@@ -485,7 +489,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		const int32 MaxAccumulatedPngs = ExpectedPngCount * 2;
 		if (AccumulatedPngMessages.Num() > MaxAccumulatedPngs)
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Accumulator too large (%d PNGs), resetting"), AccumulatedPngMessages.Num());
+			if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Accumulator too large (%d PNGs), resetting"), AccumulatedPngMessages.Num());
 			AccumulatedPngMessages.Empty();
 			MessagesSinceLastFrame = 0;
 			return;
@@ -516,7 +520,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 			
 			if (bFoundDuplicates)
 			{
-				UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Found duplicate PNGs, skipping frame"));
+				if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyImageFetcher] Found duplicate PNGs, skipping frame"));
 				AccumulatedPngMessages.RemoveAt(0, ExpectedPngCount, EAllowShrinking::No);
 				MessagesSinceLastFrame = 0;
 				continue;
@@ -671,7 +675,7 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				}
 				if (RGBIndex != INDEX_NONE && DecodedTextures[RGBIndex])
 				{
-					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting RGB texture (FrameBuffer index 0) - texture %d"), RGBIndex);
+					if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting RGB texture (FrameBuffer index 0) - texture %d"), RGBIndex);
 					OnTextureReceived.Broadcast(DecodedTextures[RGBIndex]);
 					SuccessfullyBroadcast++;
 				}
@@ -691,14 +695,14 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				}
 				if (DepthIndex != INDEX_NONE && DecodedTextures[DepthIndex])
 				{
-					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting Depth texture (FrameBuffer index 1) - texture %d"), DepthIndex);
+					if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting Depth texture (FrameBuffer index 1) - texture %d"), DepthIndex);
 					OnTextureReceived.Broadcast(DecodedTextures[DepthIndex]);
 					SuccessfullyBroadcast++;
 				}
 			}
 			else
 			{
-				UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Depth texture missing (optional)"));
+				if(debug) UE_LOG(LogTemp, Verbose, TEXT("[ComfyImageFetcher] Depth texture missing (optional)"));
 			}
 			
 			// Broadcast Mask third (always index 2)
@@ -715,13 +719,13 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 				}
 				if (MaskIndex != INDEX_NONE && DecodedTextures[MaskIndex])
 				{
-					UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting Mask texture (FrameBuffer index 2) - texture %d"), MaskIndex);
+					if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Broadcasting Mask texture (FrameBuffer index 2) - texture %d"), MaskIndex);
 					OnTextureReceived.Broadcast(DecodedTextures[MaskIndex]);
 					SuccessfullyBroadcast++;
 				}
 			}
 			
-			UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast %d textures in order RGB->Depth->Mask (RGB=%s, Depth=%s, Mask=%s)"), 
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyImageFetcher] Successfully processed and broadcast %d textures in order RGB->Depth->Mask (RGB=%s, Depth=%s, Mask=%s)"), 
 				SuccessfullyBroadcast,
 				AssignedIndices.Contains(0) ? TEXT("YES") : TEXT("NO"),
 				AssignedIndices.Contains(1) ? TEXT("YES") : TEXT("NO"),
