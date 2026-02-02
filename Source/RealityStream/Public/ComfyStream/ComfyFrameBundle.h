@@ -15,11 +15,12 @@ struct FComfyFrame
     bool IsComplete() const
     {
         // Frame is complete if we have RGB and Mask (Depth is optional)
-        return RGB && Mask;
+        // Use IsValid() to check for valid textures, not just null pointers
+        return IsValid(RGB) && IsValid(Mask);
     }
     
     bool HasDepth() const
     {
-        return Depth != nullptr;
+        return IsValid(Depth);
     }
 };

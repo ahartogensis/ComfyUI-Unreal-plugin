@@ -6,7 +6,7 @@
 #include "Engine/Texture2D.h"
 #include "Math/UnrealMathUtility.h"
 
-if debug = 0;
+static bool debug = false;
 //Actor that receives 3 texture maps from ComfyUI and applies to to a material 
 
 AComfyStreamActor::AComfyStreamActor()
@@ -90,8 +90,13 @@ void AComfyStreamActor::Tick(float DeltaTime)
 			}
 		}
 		
-		// If queue is empty and we still have a latest frame, apply it
-		if (InterpolationQueue.Num() == 0 && LatestFrame.IsComplete())
+		// If queue is empty, interpolation is complete
+		// The final frame should have already been applied via the queue
+	}
+	else
+	{
+		// No interpolation - apply latest frame directly if available
+		if (LatestFrame.IsComplete())
 		{
 			ApplyTexturesToMaterial(LatestFrame);
 			FVector FixedPosition = GetActorLocation();
@@ -224,11 +229,11 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 	}
 
 	// Set required textures (RGB and Mask) - both must be valid
-	if (!Frame.RGB || !Frame.Mask)
+	if (!IsValid(Frame.RGB) || !IsValid(Frame.Mask))
 	{
 		if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] ApplyTexturesToMaterial called with invalid frame - RGB=%s, Mask=%s"), 
-			Frame.RGB ? TEXT("valid") : TEXT("NULL"),
-			Frame.Mask ? TEXT("valid") : TEXT("NULL"));
+			IsValid(Frame.RGB) ? TEXT("valid") : TEXT("NULL"),
+			IsValid(Frame.Mask) ? TEXT("valid") : TEXT("NULL"));
 		return;
 	}
 	
@@ -236,7 +241,7 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 	DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
 	
 	// Set Depth if available (optional)
-	if (Frame.Depth)
+	if (IsValid(Frame.Depth))
 	{
 		DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
 	}
@@ -295,7 +300,7 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 		bool bTexturesChanged = !bMaterialHasRGB || !bMaterialHasMask || 
 		                        (CurrentRGB != Frame.RGB || CurrentMask != Frame.Mask);
 		// Also check if Depth changed (if it exists)
-		if (Frame.Depth && (!bMaterialHasDepth || CurrentDepth != Frame.Depth))
+		if (IsValid(Frame.Depth) && (!bMaterialHasDepth || CurrentDepth != Frame.Depth))
 		{
 			bTexturesChanged = true;
 		}
@@ -303,14 +308,14 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 		if (bTexturesChanged)
 		{
 			// Ensure required textures (RGB and Mask) are valid before setting
-			if (Frame.RGB && Frame.Mask)
+			if (IsValid(Frame.RGB) && IsValid(Frame.Mask))
 			{
 				//Set required textures
 				ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
 				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
 				
 				//Set Depth if available (optional)
-				if (Frame.Depth)
+				if (IsValid(Frame.Depth))
 				{
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_Object"), Frame.Depth);
 				}
@@ -321,34 +326,44 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 				}
 
 				//If material supports lerp alpha parameter, enable lerping
-				float LerpParam = 0.0f;
-				if (ActorDataPtr->Material->GetScalarParameterValue(TEXT("LerpAlpha"), LerpParam))
+				// Only use material lerp if interpolation is disabled (interpolation handles blending itself)
+				if (!bEnableInterpolation)
 				{
-					ActorDataPtr->LerpAlpha = 0.0f;
-					ActorDataPtr->bIsLerping = true;
-					//Set new textures as target for lerp
-					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
-					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
-					if (Frame.Depth)
+					float LerpParam = 0.0f;
+					if (ActorDataPtr->Material->GetScalarParameterValue(TEXT("LerpAlpha"), LerpParam))
 					{
-						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
+						ActorDataPtr->LerpAlpha = 0.0f;
+						ActorDataPtr->bIsLerping = true;
+						//Set new textures as target for lerp
+						ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map_New"), Frame.RGB);
+						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map_New"), Frame.Mask);
+						if (IsValid(Frame.Depth))
+						{
+							ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), Frame.Depth);
+						}
+						else
+						{
+							ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), nullptr);
+						}
 					}
-					else
-					{
-						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_New"), nullptr);
-					}
+				}
+				else
+				{
+					// When interpolation is enabled, disable material lerp to avoid conflicts
+					ActorDataPtr->bIsLerping = false;
+					ActorDataPtr->LerpAlpha = 1.0f;
 				}
 				
 				if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Updated textures on actor: RGB=%s, Depth=%s, Mask=%s"), 
-					Frame.RGB ? *Frame.RGB->GetName() : TEXT("NULL"),
-					Frame.Depth ? *Frame.Depth->GetName() : TEXT("NULL"),
-					Frame.Mask ? *Frame.Mask->GetName() : TEXT("NULL"));
+					IsValid(Frame.RGB) ? *Frame.RGB->GetName() : TEXT("NULL"),
+					IsValid(Frame.Depth) ? *Frame.Depth->GetName() : TEXT("NULL"),
+					IsValid(Frame.Mask) ? *Frame.Mask->GetName() : TEXT("NULL"));
 			}
 			else
 			{
 				if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Frame missing required textures - RGB=%s, Mask=%s"), 
-					Frame.RGB ? TEXT("valid") : TEXT("NULL"),
-					Frame.Mask ? TEXT("valid") : TEXT("NULL"));
+					IsValid(Frame.RGB) ? TEXT("valid") : TEXT("NULL"),
+					IsValid(Frame.Mask) ? TEXT("valid") : TEXT("NULL"));
 			}
 		}
 		else
@@ -367,13 +382,13 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 			if (ActorDataPtr->Material)
 			{
 				// Ensure required textures (RGB and Mask) are valid before setting
-				if (Frame.RGB && Frame.Mask)
+				if (IsValid(Frame.RGB) && IsValid(Frame.Mask))
 				{
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
 					
 					// Set Depth if available (optional)
-					if (Frame.Depth)
+					if (IsValid(Frame.Depth))
 					{
 						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_Object"), Frame.Depth);
 					}
@@ -388,15 +403,15 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 					ActorDataPtr->OpacityAlpha = 1.0f;
 					
 					if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Created material and set textures on new actor: RGB=%s, Depth=%s, Mask=%s"), 
-						Frame.RGB ? *Frame.RGB->GetName() : TEXT("NULL"),
-						Frame.Depth ? *Frame.Depth->GetName() : TEXT("NULL"),
-						Frame.Mask ? *Frame.Mask->GetName() : TEXT("NULL"));
+						IsValid(Frame.RGB) ? *Frame.RGB->GetName() : TEXT("NULL"),
+						IsValid(Frame.Depth) ? *Frame.Depth->GetName() : TEXT("NULL"),
+						IsValid(Frame.Mask) ? *Frame.Mask->GetName() : TEXT("NULL"));
 				}
 				else
 				{
 					UE_LOG(LogTemp, Error, TEXT("[ComfyStreamActor] Failed to set textures on new actor - Frame missing required textures: RGB=%s, Mask=%s"), 
-						Frame.RGB ? TEXT("valid") : TEXT("NULL"),
-						Frame.Mask ? TEXT("valid") : TEXT("NULL"));
+						IsValid(Frame.RGB) ? TEXT("valid") : TEXT("NULL"),
+						IsValid(Frame.Mask) ? TEXT("valid") : TEXT("NULL"));
 				}
 			}
 			else
@@ -488,7 +503,9 @@ void AComfyStreamActor::ScaleActorToTextureSize(AActor* Actor, const FComfyFrame
 void AComfyStreamActor::UpdateActorLerp(FActorLerpData& Data, const FComfyFrame& Frame, float DeltaTime)
 {
 	if (!Data.bIsLerping || !IsValid(Data.Material)) return;
-	UMaterialInterface* material = Data.Material; 
+	UMaterialInstanceDynamic* material = Cast<UMaterialInstanceDynamic>(Data.Material);
+	if (!material) return;
+	
 	Data.LerpAlpha = FMath::Clamp(Data.LerpAlpha + (DeltaTime * LerpSpeed), 0.0f, 1.0f);
 	material->SetScalarParameterValue(TEXT("LerpAlpha"), Data.LerpAlpha);
 
@@ -503,11 +520,11 @@ void AComfyStreamActor::UpdateActorLerp(FActorLerpData& Data, const FComfyFrame&
 			material->GetTextureParameterValue(TEXT("Mask_Map_New"), NewMask);
 
 			// Swap required textures (RGB and Mask)
-			if (NewRGB) material->SetTextureParameterValue(TEXT("RGB_Map"), NewRGB);
-			if (NewMask) material->SetTextureParameterValue(TEXT("Mask_Map"), NewMask);
+			if (IsValid(NewRGB)) material->SetTextureParameterValue(TEXT("RGB_Map"), NewRGB);
+			if (IsValid(NewMask)) material->SetTextureParameterValue(TEXT("Mask_Map"), NewMask);
 			
 			// Swap Depth if available (optional)
-			if (NewDepth)
+			if (IsValid(NewDepth))
 			{
 				material->SetTextureParameterValue(TEXT("Depth_Map_Object"), NewDepth);
 			}
@@ -537,51 +554,62 @@ void AComfyStreamActor::GenerateInterpolatedFrames(const FComfyFrame& FromFrame,
 	// Clear existing interpolation queue
 	InterpolationQueue.Empty();
 
-	// Generate interpolated frames
+	// Generate interpolated frames with smooth easing
 	for (int32 i = 1; i <= NumInterpolatedFrames; ++i)
 	{
-		float Alpha = float(i) / float(NumInterpolatedFrames + 1);
+		// Calculate linear alpha (0.0 to 1.0)
+		float LinearAlpha = float(i) / float(NumInterpolatedFrames + 1);
+		
+		// Apply smooth easing function (ease-in-out cubic) for more natural transitions
+		float Alpha = LinearAlpha;
+		if (bUseSmoothEasing)
+		{
+			// Smooth step (ease-in-out cubic): 3t^2 - 2t^3
+			Alpha = LinearAlpha * LinearAlpha * (3.0f - 2.0f * LinearAlpha);
+			// Alternative: ease-in-out cubic (even smoother)
+			// Alpha = LinearAlpha < 0.5f ? 4.0f * LinearAlpha * LinearAlpha * LinearAlpha : 1.0f - FMath::Pow(-2.0f * LinearAlpha + 2.0f, 3.0f) / 2.0f;
+		}
 		
 		FComfyFrame InterpolatedFrame;
 		
 		// Blend RGB textures
-		if (FromFrame.RGB && ToFrame.RGB)
+		if (IsValid(FromFrame.RGB) && IsValid(ToFrame.RGB))
 		{
 			InterpolatedFrame.RGB = BlendTextures(FromFrame.RGB, ToFrame.RGB, Alpha);
 		}
-		else if (ToFrame.RGB)
+		else if (IsValid(ToFrame.RGB))
 		{
 			InterpolatedFrame.RGB = ToFrame.RGB;
 		}
-		else if (FromFrame.RGB)
+		else if (IsValid(FromFrame.RGB))
 		{
 			InterpolatedFrame.RGB = FromFrame.RGB;
 		}
 
 		// Blend Mask textures
-		if (FromFrame.Mask && ToFrame.Mask)
+		if (IsValid(FromFrame.Mask) && IsValid(ToFrame.Mask))
 		{
 			InterpolatedFrame.Mask = BlendTextures(FromFrame.Mask, ToFrame.Mask, Alpha);
 		}
-		else if (ToFrame.Mask)
+		else if (IsValid(ToFrame.Mask))
 		{
 			InterpolatedFrame.Mask = ToFrame.Mask;
 		}
-		else if (FromFrame.Mask)
+		else if (IsValid(FromFrame.Mask))
 		{
 			InterpolatedFrame.Mask = FromFrame.Mask;
 		}
 
 		// Blend Depth textures (optional)
-		if (FromFrame.Depth && ToFrame.Depth)
+		if (IsValid(FromFrame.Depth) && IsValid(ToFrame.Depth))
 		{
 			InterpolatedFrame.Depth = BlendTextures(FromFrame.Depth, ToFrame.Depth, Alpha);
 		}
-		else if (ToFrame.Depth)
+		else if (IsValid(ToFrame.Depth))
 		{
 			InterpolatedFrame.Depth = ToFrame.Depth;
 		}
-		else if (FromFrame.Depth)
+		else if (IsValid(FromFrame.Depth))
 		{
 			InterpolatedFrame.Depth = FromFrame.Depth;
 		}
@@ -591,9 +619,18 @@ void AComfyStreamActor::GenerateInterpolatedFrames(const FComfyFrame& FromFrame,
 		{
 			FInterpolatedFrame QueueEntry;
 			QueueEntry.Frame = InterpolatedFrame;
-			QueueEntry.TimeRemaining = InterpolationDuration / float(NumInterpolatedFrames);
+			QueueEntry.TimeRemaining = InterpolationDuration / float(NumInterpolatedFrames + 1); // +1 to include final frame timing
 			InterpolationQueue.Add(QueueEntry);
 		}
+	}
+	
+	// Add the final frame (ToFrame) at the end of interpolation
+	if (ToFrame.IsComplete())
+	{
+		FInterpolatedFrame FinalFrame;
+		FinalFrame.Frame = ToFrame;
+		FinalFrame.TimeRemaining = InterpolationDuration / float(NumInterpolatedFrames + 1);
+		InterpolationQueue.Add(FinalFrame);
 	}
 
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Generated %d interpolated frames"), InterpolationQueue.Num());
@@ -601,7 +638,7 @@ void AComfyStreamActor::GenerateInterpolatedFrames(const FComfyFrame& FromFrame,
 
 UTexture2D* AComfyStreamActor::BlendTextures(UTexture2D* TextureA, UTexture2D* TextureB, float Alpha)
 {
-	if (!TextureA || !TextureB)
+	if (!IsValid(TextureA) || !IsValid(TextureB))
 	{
 		return Alpha >= 0.5f ? TextureB : TextureA;
 	}
@@ -740,9 +777,9 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 	if (!Frame.IsComplete())
 	{
 		if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] Received incomplete frame - RGB=%s, Mask=%s, Depth=%s. Waiting for complete frame."),
-			Frame.RGB ? TEXT("valid") : TEXT("NULL"),
-			Frame.Mask ? TEXT("valid") : TEXT("NULL"),
-			Frame.Depth ? TEXT("valid") : TEXT("NULL"));
+			IsValid(Frame.RGB) ? TEXT("valid") : TEXT("NULL"),
+			IsValid(Frame.Mask) ? TEXT("valid") : TEXT("NULL"),
+			IsValid(Frame.Depth) ? TEXT("valid") : TEXT("NULL"));
 		return;
 	}
 	
@@ -756,9 +793,9 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 	LatestFrame = Frame;
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Received complete frame - RGB=%s, Mask=%s, Depth=%s"), 
-		Frame.RGB ? *Frame.RGB->GetName() : TEXT("NULL"),
-		Frame.Mask ? *Frame.Mask->GetName() : TEXT("NULL"),
-		Frame.Depth ? *Frame.Depth->GetName() : TEXT("NULL"));
+		IsValid(Frame.RGB) ? *Frame.RGB->GetName() : TEXT("NULL"),
+		IsValid(Frame.Mask) ? *Frame.Mask->GetName() : TEXT("NULL"),
+		IsValid(Frame.Depth) ? *Frame.Depth->GetName() : TEXT("NULL"));
 	
 	// Check if this is actually a new frame (textures are different from last applied frame)
 	// Only update if we have a new complete frame ready to replace the current one

@@ -1230,7 +1230,7 @@ bool UHyper3DObjectsSubsystem::LoadOBJ(
 
 				if (!Positions.IsValidIndex(Idx.Position))
 				{
-					if(debug)(LogTemp, Warning, TEXT("[Hyper3DObjects] Invalid position index in OBJ: %s"), *ObjPath);
+					if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Invalid position index in OBJ: %s"), *ObjPath);
 					return false;
 				}
 
@@ -1825,7 +1825,7 @@ FString UHyper3DObjectsSubsystem::GetImportDirectory() const
 	}
 
 	// Fallback to explicit path provided by the user (absolute path)
-	return Null;
+	return FString();
 }
 
 void UHyper3DObjectsSubsystem::DestroyAllObjects()

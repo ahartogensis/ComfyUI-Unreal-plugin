@@ -380,8 +380,6 @@ void UComfyImageFetcher::ProcessImageData(const TArray<uint8>& In)
 		return;
 	}
 
-	//CHECK IF NEED THIS
-	//_________________________________
 	// Handle optional tiny JSON preamble `{...}\n` (older WebViewer "meta")
 	if (In.Num() > Offset && In[Offset] == '{')
 	{

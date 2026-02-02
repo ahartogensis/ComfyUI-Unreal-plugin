@@ -52,14 +52,22 @@ public:
 	float FadeOutDuration = 0.5f;
 
 	//Frame interpolation settings
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation")
+	// Generates intermediate blended frames between consecutive frames for smoother transitions
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (Tooltip = "Enable frame interpolation to generate smooth transitions between frames"))
 	bool bEnableInterpolation = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation"))
-	int32 NumInterpolatedFrames = 3;
+	// Number of intermediate frames to generate between each pair of frames
+	// Higher values = smoother transitions but more CPU/GPU cost
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation", ClampMin = "1", ClampMax = "60", Tooltip = "Number of interpolated frames between each real frame. Higher = smoother but more expensive."))
+	int32 NumInterpolatedFrames = 20;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation"))
-	float InterpolationDuration = 0.5f;
+	// Total duration to display all interpolated frames before showing the final frame
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation", ClampMin = "0.1", Tooltip = "Time in seconds to display all interpolated frames"))
+	float InterpolationDuration = 1.0f;
+
+	// Use smooth easing function instead of linear interpolation for more natural motion
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (EditCondition = "bEnableInterpolation", Tooltip = "Use smooth easing (ease-in-out) for more natural transitions"))
+	bool bUseSmoothEasing = true;
 
 	//Blueprint events 
 	UFUNCTION(BlueprintImplementableEvent)
