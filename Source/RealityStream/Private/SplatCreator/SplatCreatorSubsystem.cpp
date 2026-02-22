@@ -1,4 +1,5 @@
 #include "SplatCreator/SplatCreatorSubsystem.h"
+#include "ComfyStream/ComfyImageSender.h"
 #include "Engine/World.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -103,6 +104,10 @@ void USplatCreatorSubsystem::Deinitialize()
 	{
 		CurrentPointCloudActor->Destroy();
 	}
+	if (ComfyImageSender)
+	{
+		ComfyImageSender->Disconnect();
+	}
 	Super::Deinitialize();
 }
 
@@ -115,6 +120,56 @@ FString USplatCreatorSubsystem::GetSplatCreatorFolder() const
 	FString PluginDir = FPaths::ProjectPluginsDir() / TEXT("RealityStream");
 	FString SplatCreatorDir = PluginDir / TEXT("SplatCreatorOutputs");
 	return SplatCreatorDir;
+}
+
+void USplatCreatorSubsystem::TrySendImageToComfyUI(const FString& PLYPath)
+{
+	if (!bSendImageToComfyUIOnPlyChange)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[SplatCreator] Image send disabled (bSendImageToComfyUIOnPlyChange=false)"));
+		return;
+	}
+	if (ComfyUIWebSocketHost.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] ComfyUIWebSocketHost is empty - cannot send image. Set it (e.g. 'localhost') in Blueprint or code."));
+		return;
+	}
+
+	// Get base name without extension (e.g. "scene" from "scene.ply")
+	FString BaseName = FPaths::GetBaseFilename(PLYPath);
+	FString Dir = FPaths::GetPath(PLYPath);
+
+	// Try .jpg first, then .png
+	FString ImagePath;
+	if (FPaths::FileExists(Dir / (BaseName + TEXT(".jpg"))))
+	{
+		ImagePath = Dir / (BaseName + TEXT(".jpg"));
+	}
+	else if (FPaths::FileExists(Dir / (BaseName + TEXT(".png"))))
+	{
+		ImagePath = Dir / (BaseName + TEXT(".png"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No matching image (.jpg/.png) for PLY '%s' in %s - ensure image has same name as PLY"), *BaseName, *Dir);
+		return;
+	}
+
+	TArray<uint8> ImageData;
+	if (!FFileHelper::LoadFileToArray(ImageData, *ImagePath))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Failed to load image: %s"), *ImagePath);
+		return;
+	}
+
+	if (!ComfyImageSender)
+	{
+		ComfyImageSender = NewObject<UComfyImageSender>(this);
+	}
+
+	FString ServerURL = FString::Printf(TEXT("ws://%s:8001"), *ComfyUIWebSocketHost);
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Sending image %s (%d bytes) to ComfyUI %s channel %d"), *FPaths::GetCleanFilename(ImagePath), ImageData.Num(), *ServerURL, ComfyUIImageChannel);
+	ComfyImageSender->ConfigureAndSend(ServerURL, ComfyUIImageChannel, ImageData);
 }
 
 void USplatCreatorSubsystem::ScanForPLYFiles()
@@ -178,6 +233,9 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
             return;
         }
 
+	// Send matching image to ComfyUI on channel 2 when PLY changes (only sent when PLY changes)
+	TrySendImageToComfyUI(PLYPath);
+
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed %d points from %s"), Positions.Num(), *PLYPath);
 	
 	// Uniformly sample points to limit count for performance
@@ -218,7 +276,7 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 		// Scale positions for display (PLY coordinates are typically small)
 		NewPositions.Empty();
 		NewPositions.Reserve(Positions.Num());
-		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f); // Move down by 100 units (moved up from -200)
+		const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
 		for (const FVector& Pos : Positions)
 		{
 			NewPositions.Add(Pos * 125.0f + DownOffset); // Scale by 125x and apply offset
@@ -692,9 +750,12 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	// Set component as root BEFORE registering (critical for proper bounds calculation)
 	CurrentPointCloudActor->SetRootComponent(PointCloudComponent);
 	
-	// Position actor at origin
-	CurrentPointCloudActor->SetActorLocation(FVector::ZeroVector);
+	CurrentPointCloudActor->SetActorLocation(FVector(0.0f, 0.0f, -150.0f));
+	CurrentPointCloudActor->SetActorRotation(FRotator(0.0f, 0.0f, 180.0f)); 
 	
+	FVector ActorLoc = CurrentPointCloudActor->GetActorLocation();
+	FRotator ActorRot = CurrentPointCloudActor->GetActorRotation();
+
 	// Register component (must be done after setting as root component)
 	PointCloudComponent->RegisterComponent();
 	
@@ -725,7 +786,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		Transforms.Reserve(BatchEnd - BatchStart);
 		
 		// Offset to move PLY down (negative Z in Unreal = down)
-		const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f);
+		const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
 		
 		for (int32 i = BatchStart; i < BatchEnd; i++)
 		{
@@ -748,7 +809,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	
 	// Store current point positions (scaled and offset) for dense region detection BEFORE broadcasting
 	// Apply the same offset as used for rendering
-	const FVector DownOffset = FVector(0.0f, 0.0f, -100.0f);
+	const FVector DownOffset = FVector(0.0f, 0.0f, 200.0f);
 	CurrentPointPositions.Empty();
 	CurrentPointPositions.Reserve(ScaledPositions.Num());
 	for (const FVector& ScaledPos : ScaledPositions)
@@ -1160,7 +1221,9 @@ FVector2D USplatCreatorSubsystem::GetSplatDimensions() const
 		return FVector2D(200.0f, 200.0f);
 	}
 	
-	FVector BoxSize = CurrentSplatBounds.GetSize();
+	// Return world-space dimensions (transform local bounds by actor transform)
+	FBox WorldBounds = GetSplatBounds();
+	FVector BoxSize = WorldBounds.GetSize();
 	FVector2D Dimensions(BoxSize.X, BoxSize.Y);
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat dimensions: X=%.1f, Y=%.1f"), Dimensions.X, Dimensions.Y);
@@ -1175,9 +1238,16 @@ FVector USplatCreatorSubsystem::GetSplatCenter() const
 		return FVector::ZeroVector;
 	}
 	
-	FVector Center = CurrentSplatBounds.GetCenter();
-	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s"), *Center.ToString());
-	return Center;
+	// Transform local center to world space (includes actor rotation)
+	FVector LocalCenter = CurrentSplatBounds.GetCenter();
+	if (CurrentPointCloudActor)
+	{
+		FVector WorldCenter = CurrentPointCloudActor->GetActorTransform().TransformPosition(LocalCenter);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s (world)"), *WorldCenter.ToString());
+		return WorldCenter;
+	}
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s (local, no actor)"), *LocalCenter.ToString());
+	return LocalCenter;
 }
 
 FBox USplatCreatorSubsystem::GetSplatBounds() const
@@ -1188,6 +1258,11 @@ FBox USplatCreatorSubsystem::GetSplatBounds() const
 		return FBox(ForceInit);
 	}
 	
+	// Transform local bounds to world space (includes actor rotation)
+	if (CurrentPointCloudActor)
+	{
+		return CurrentSplatBounds.TransformBy(CurrentPointCloudActor->GetActorTransform());
+	}
 	return CurrentSplatBounds;
 }
 
@@ -1202,18 +1277,17 @@ TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThresh
 		return DenseRegions;
 	}
 	
-	// Points with small sphere sizes indicate dense regions
-	// Small sphere sizes (like 0.1) indicate dense areas, large ones (0.3) indicate sparse areas
-	// DensityThreshold is the maximum sphere size to consider as dense (default 0.15 means sphere size <= 0.15 is dense)
-	const float MaxDenseSphereSize = DensityThreshold;
+	const FTransform ActorTransform = CurrentPointCloudActor ? CurrentPointCloudActor->GetActorTransform() : FTransform::Identity;
 	
+	// Points with small sphere sizes indicate dense regions
+	const float MaxDenseSphereSize = DensityThreshold;
 	int32 DenseCount = 0;
 	for (int32 i = 0; i < CurrentPointPositions.Num() && i < SphereSizes.Num(); i++)
 	{
-		// Small sphere size = dense region
 		if (SphereSizes[i] <= MaxDenseSphereSize)
 		{
-			DenseRegions.Add(CurrentPointPositions[i]);
+			// Transform local position to world space
+			DenseRegions.Add(ActorTransform.TransformPosition(CurrentPointPositions[i]));
 			DenseCount++;
 		}
 	}
@@ -1228,37 +1302,35 @@ bool USplatCreatorSubsystem::IsPositionTooCloseToSplatPoints(const FVector& Posi
 {
 	if (CurrentPointPositions.Num() == 0)
 	{
-		// No splat points loaded yet, so position is valid
 		return false;
 	}
 
-	// Check distance to all splat points
-	// For performance, we could optimize this with spatial partitioning, but for now check all points
+	// Position is in world space; transform splat points to world for comparison
+	const FTransform ActorTransform = CurrentPointCloudActor ? CurrentPointCloudActor->GetActorTransform() : FTransform::Identity;
 	const float MinDistanceSquared = MinDistance * MinDistance;
 	
-	for (const FVector& SplatPoint : CurrentPointPositions)
+	for (const FVector& LocalSplatPoint : CurrentPointPositions)
 	{
+		FVector WorldSplatPoint = ActorTransform.TransformPosition(LocalSplatPoint);
 		float DistanceSquared;
 		if (bCheckHorizontalOnly)
 		{
-			// Only check horizontal (X,Y) distance, ignore Z
 			FVector2D Pos2D(Position.X, Position.Y);
-			FVector2D Splat2D(SplatPoint.X, SplatPoint.Y);
+			FVector2D Splat2D(WorldSplatPoint.X, WorldSplatPoint.Y);
 			DistanceSquared = FVector2D::DistSquared(Pos2D, Splat2D);
 		}
 		else
 		{
-			// Check full 3D distance
-			DistanceSquared = FVector::DistSquared(Position, SplatPoint);
+			DistanceSquared = FVector::DistSquared(Position, WorldSplatPoint);
 		}
 		
 		if (DistanceSquared < MinDistanceSquared)
 		{
-			return true; // Position is too close to a splat point
+			return true;
 		}
 	}
 	
-	return false; // Position is far enough from all splat points
+	return false;
 }
 
 // ============================================================
@@ -1594,6 +1666,7 @@ void USplatCreatorSubsystem::StartRandomMovement()
 	
 	// Initialize random velocities and targets for each sphere
 	int32 NumSpheres = BasePointPositions.Num();
+
 	RandomVelocities.Empty();
 	RandomTargets.Empty();
 	RandomCurrentPositions.Empty();

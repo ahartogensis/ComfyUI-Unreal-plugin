@@ -114,6 +114,16 @@ private:
 	FVector SplatCenter; // Center point for scaling
 	bool bHasSplatCenter = false;
 	
+	// ComfyUI image send (when PLY changes, send matching JPG/PNG to channel 2)
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI")
+	bool bSendImageToComfyUIOnPlyChange = true;
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
+	FString ComfyUIWebSocketHost = TEXT("localhost");
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
+	int32 ComfyUIImageChannel = 2;
+	UPROPERTY()
+	class UComfyImageSender* ComfyImageSender = nullptr;
+
 	// Random movement system
 	FTimerHandle RandomMovementTimer;
 	bool bIsRandomMoving = false;
@@ -152,6 +162,7 @@ private:
 	void ScaleSplat(float NewScaleMultiplier);
 	void UpdateSplatScale();
 	void ResetToNormal(); // Reset all transformations to default state
+	void TrySendImageToComfyUI(const FString& PLYPath);
 	
 	FString GetSplatCreatorFolder() const;
 };
