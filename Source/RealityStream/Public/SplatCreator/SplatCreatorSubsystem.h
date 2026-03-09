@@ -5,6 +5,11 @@
 #include "SplatCreatorSubsystem.generated.h"
 
 class UHierarchicalInstancedStaticMeshComponent;
+class UPrimitiveComponent;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
+class UTexture2D;
+class UCanvas;
 
 // Delegate for when splat bounds are updated
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSplatBoundsUpdated, FBox, NewBounds);
@@ -64,6 +69,32 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	void HandleOSCMessage(const FString& Message);
 
+	// Cycle to the next splat. Called by ComfyStreamActor when bCycleSplatOnComfyFrame is true and a new frame is received.
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
+	void CycleToNextSplat();
+
+	// Set the plane to display the image that gets sent to ComfyUI.
+	// Uses M_image material by default (Image parameter). Pass Material to override.
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI")
+	void SetImagePreviewTarget(UPrimitiveComponent* PlaneComponent, UMaterialInterface* Material = nullptr);
+
+	// Material path for image preview (default: M_image with "Image" texture param)
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
+	FSoftObjectPath ImagePreviewMaterialPath = FSoftObjectPath(TEXT("/Game/_GENERATED/Materials/M_image.M_image"));
+
+	/** If true, overlay text (e.g. filename) onto the preview image using a canvas render target */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview")
+	bool bAddTextToImagePreview = true;
+	/** Text to display on the preview. Use {0} for filename, {1} for index (e.g. "Frame: {0} ({1}/{2})") */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
+	FString ImagePreviewTextFormat = TEXT("{0}");
+	/** Position of the text overlay in pixels (X, Y from top-left) */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
+	FVector2D ImagePreviewTextPosition = FVector2D(10, 10);
+	/** Scale of the text (1.0 = default size) */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
+	float ImagePreviewTextScale = 2.0f;
+
 	// Event broadcast when splat bounds are updated (useful for other subsystems to react)
 	UPROPERTY(BlueprintAssignable, Category = "SplatCreator")
 	FOnSplatBoundsUpdated OnSplatBoundsUpdated;
@@ -73,6 +104,7 @@ private:
 	// PLY file management
 	TArray<FString> PlyFiles;
 	int32 CurrentFileIndex = 0;
+	int32 NextFileIndex = -1;  // Pre-chosen next index; image for this is sent to ComfyUI so splat change matches received image
 	FTimerHandle CycleTimer;
 	
 	// Point cloud rendering
@@ -117,12 +149,32 @@ private:
 	// ComfyUI image send (when PLY changes, send matching JPG/PNG to channel 2)
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI")
 	bool bSendImageToComfyUIOnPlyChange = true;
+	// When true, splat changes when a new frame is received from ComfyUI instead of on a timer
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
-	FString ComfyUIWebSocketHost = TEXT("localhost");
+	bool bCycleSplatOnComfyFrame = false;
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
+	FString ComfyUIWebSocketHost = TEXT("127.0.0.1");
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
 	int32 ComfyUIImageChannel = 2;
 	UPROPERTY()
 	class UComfyImageSender* ComfyImageSender = nullptr;
+	UPROPERTY()
+	class UComfyPngDecoder* ImageDecoder = nullptr;
+
+	// Image preview on plane (image sent to ComfyUI is also displayed here)
+	TWeakObjectPtr<UPrimitiveComponent> ImagePreviewPlaneComponent;
+	TWeakObjectPtr<UMaterialInterface> ImagePreviewMaterial;
+	UPROPERTY()
+	UMaterialInstanceDynamic* ImagePreviewMID = nullptr;
+
+	// Text overlay on image (canvas render target compositing)
+	UPROPERTY()
+	class UCanvasRenderTarget2D* CanvasRenderTargetForText = nullptr;
+	UPROPERTY()
+	UTexture2D* TextOverlaySourceTexture = nullptr;  // Texture to draw in canvas callback
+	FString TextOverlayDisplayText;  // Text to draw in canvas callback
+	UFUNCTION()
+	void OnCanvasRenderTargetUpdate(UCanvas* Canvas, int32 Width, int32 Height);
 
 	// Random movement system
 	FTimerHandle RandomMovementTimer;
@@ -163,6 +215,7 @@ private:
 	void UpdateSplatScale();
 	void ResetToNormal(); // Reset all transformations to default state
 	void TrySendImageToComfyUI(const FString& PLYPath);
-	
+	void UpdateImagePreview(const FString& PLYPath);
+
 	FString GetSplatCreatorFolder() const;
 };

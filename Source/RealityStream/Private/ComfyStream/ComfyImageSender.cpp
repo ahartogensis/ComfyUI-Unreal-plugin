@@ -54,6 +54,7 @@ void UComfyImageSender::EnsureConnection()
 	{
 		FModuleManager::LoadModuleChecked<FWebSocketsModule>(TEXT("WebSockets"));
 		FString WebSocketURL = BuildWebSocketURL(CurrentServerURL, CurrentChannel);
+		UE_LOG(LogTemp, Display, TEXT("[ComfyImageSender] Connecting to %s (channel %d) to send image"), *WebSocketURL, CurrentChannel);
 
 		WebSocket = FWebSocketsModule::Get().CreateWebSocket(WebSocketURL);
 
@@ -83,6 +84,7 @@ void UComfyImageSender::OnWebSocketConnected()
 
 void UComfyImageSender::OnWebSocketConnectionError(const FString& Error)
 {
+	UE_LOG(LogTemp, Warning, TEXT("[ComfyImageSender] WebSocket connection error: %s"), *Error);
 	bPendingSend = false;
 	PendingImageData.Empty();
 	WebSocket.Reset();
@@ -119,6 +121,7 @@ void UComfyImageSender::SendPendingImage()
 	FMemory::Memcpy(MessageWithHeader.GetData() + 8, PendingImageData.GetData(), PendingImageData.Num());
 
 	WebSocket->Send(MessageWithHeader.GetData(), MessageWithHeader.Num(), true);
+	UE_LOG(LogTemp, Display, TEXT("[ComfyImageSender] Sent %d bytes (image + header) on channel %d"), MessageWithHeader.Num(), CurrentChannel);
 
 	bPendingSend = false;
 	PendingImageData.Empty();

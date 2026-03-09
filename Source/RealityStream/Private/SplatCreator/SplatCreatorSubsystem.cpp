@@ -1,6 +1,12 @@
 #include "SplatCreator/SplatCreatorSubsystem.h"
 #include "ComfyStream/ComfyImageSender.h"
+#include "ComfyStream/ComfyPngDecoder.h"
+#include "Components/PrimitiveComponent.h"
 #include "Engine/World.h"
+#include "Engine/Canvas.h"
+#include "Engine/CanvasRenderTarget2D.h"
+#include "Engine/Texture2D.h"
+#include "Engine/Engine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "GameFramework/Actor.h"
@@ -8,7 +14,6 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "Engine/Engine.h"
 #include "Camera/PlayerCameraManager.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -62,20 +67,27 @@ void USplatCreatorSubsystem::StartPointCloudSystem()
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files"), PlyFiles.Num());
 	
-	// Load first PLY file
-	FString FirstPLYPath = GetSplatCreatorFolder() / PlyFiles[0];
+	// Load a random PLY file (not alphabetical)
+	CurrentFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1);
+	FString FirstPLYPath = GetSplatCreatorFolder() / PlyFiles[CurrentFileIndex];
 	LoadPLYFile(FirstPLYPath);
 	
-	// Start cycle timer (45 seconds)
-	// Note: Timer may be delayed if game thread is busy, but optimizations should prevent that
-	World->GetTimerManager().SetTimer(
-		CycleTimer,
-		this,
-		&USplatCreatorSubsystem::CycleToNextPLY,
-		45.0f,
-		true
-	);
-	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every 45 seconds"));
+	// Start cycle timer unless cycling on ComfyUI frame receipt
+	if (!bCycleSplatOnComfyFrame)
+	{
+		World->GetTimerManager().SetTimer(
+			CycleTimer,
+			this,
+			&USplatCreatorSubsystem::CycleToNextPLY,
+			10.0f,
+			true
+		);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every 10 seconds"));
+	}
+	else
+	{
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat will cycle when new frame received from ComfyUI (timer disabled)"));
+	}
 	
 	bIsInitialized = true;
 }
@@ -114,6 +126,17 @@ void USplatCreatorSubsystem::Deinitialize()
 // ============================================================
 // FIND PLYs
 // ============================================================
+
+void USplatCreatorSubsystem::SetImagePreviewTarget(UPrimitiveComponent* PlaneComponent, UMaterialInterface* Material)
+{
+	ImagePreviewPlaneComponent = PlaneComponent;
+	ImagePreviewMaterial = Material; // nullptr = will load from ImagePreviewMaterialPath when needed
+	ImagePreviewMID = nullptr; // Will be created when we first display an image
+	if (debug && PlaneComponent)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Image preview target set - plane will display ComfyUI-bound image"));
+	}
+}
 
 FString USplatCreatorSubsystem::GetSplatCreatorFolder() const
 {
@@ -168,8 +191,135 @@ void USplatCreatorSubsystem::TrySendImageToComfyUI(const FString& PLYPath)
 	}
 
 	FString ServerURL = FString::Printf(TEXT("ws://%s:8001"), *ComfyUIWebSocketHost);
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Sending image %s (%d bytes) to ComfyUI %s channel %d"), *FPaths::GetCleanFilename(ImagePath), ImageData.Num(), *ServerURL, ComfyUIImageChannel);
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Sending image to ComfyUI %s channel %d (%d bytes)"), *ServerURL, ComfyUIImageChannel, ImageData.Num());
 	ComfyImageSender->ConfigureAndSend(ServerURL, ComfyUIImageChannel, ImageData);
+}
+
+void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
+{
+	UPrimitiveComponent* Plane = ImagePreviewPlaneComponent.Get();
+	if (!Plane || !IsValid(Plane))
+	{
+		return;
+	}
+
+	UMaterialInterface* Mat = ImagePreviewMaterial.Get();
+	if (!Mat && ImagePreviewMaterialPath.IsValid())
+	{
+		Mat = Cast<UMaterialInterface>(ImagePreviewMaterialPath.TryLoad());
+		if (Mat) ImagePreviewMaterial = Mat;
+	}
+	if (!Mat || !IsValid(Mat))
+	{
+		return;
+	}
+
+	FString BaseName = FPaths::GetBaseFilename(PLYPath);
+	FString Dir = FPaths::GetPath(PLYPath);
+
+	FString ImagePath;
+	if (FPaths::FileExists(Dir / (BaseName + TEXT(".jpg"))))
+	{
+		ImagePath = Dir / (BaseName + TEXT(".jpg"));
+	}
+	else if (FPaths::FileExists(Dir / (BaseName + TEXT(".png"))))
+	{
+		ImagePath = Dir / (BaseName + TEXT(".png"));
+	}
+	else
+	{
+		return;
+	}
+
+	TArray<uint8> ImageData;
+	if (!FFileHelper::LoadFileToArray(ImageData, *ImagePath))
+	{
+		return;
+	}
+
+	if (!ImageDecoder)
+	{
+		ImageDecoder = NewObject<UComfyPngDecoder>(this);
+	}
+	if (!ImageDecoder)
+	{
+		return;
+	}
+
+	UTexture2D* DecodedTexture = ImageDecoder->DecodePNGToTexture(ImageData);
+	if (!DecodedTexture || !IsValid(DecodedTexture))
+	{
+		return;
+	}
+
+	UTexture* FinalTexture = DecodedTexture;
+	if (bAddTextToImagePreview)
+	{
+		UWorld* World = GetWorld();
+		if (World)
+		{
+			int32 TexW = DecodedTexture->GetSurfaceWidth();
+			int32 TexH = DecodedTexture->GetSurfaceHeight();
+			if (TexW > 0 && TexH > 0)
+			{
+				if (!CanvasRenderTargetForText || CanvasRenderTargetForText->SizeX != TexW || CanvasRenderTargetForText->SizeY != TexH)
+				{
+					CanvasRenderTargetForText = UCanvasRenderTarget2D::CreateCanvasRenderTarget2D(World, UCanvasRenderTarget2D::StaticClass(), TexW, TexH);
+					if (CanvasRenderTargetForText)
+					{
+						CanvasRenderTargetForText->OnCanvasRenderTargetUpdate.AddDynamic(this, &USplatCreatorSubsystem::OnCanvasRenderTargetUpdate);
+					}
+				}
+				if (CanvasRenderTargetForText)
+				{
+					FString DisplayText = ImagePreviewTextFormat;
+					DisplayText.ReplaceInline(TEXT("{0}"), *BaseName);
+					DisplayText.ReplaceInline(TEXT("{1}"), *FString::FromInt(CurrentFileIndex + 1));
+					DisplayText.ReplaceInline(TEXT("{2}"), *FString::FromInt(PlyFiles.Num()));
+					TextOverlaySourceTexture = DecodedTexture;
+					TextOverlayDisplayText = DisplayText;
+					CanvasRenderTargetForText->UpdateResource();
+					FinalTexture = CanvasRenderTargetForText;
+					TextOverlaySourceTexture = nullptr;
+				}
+			}
+		}
+	}
+
+	if (!ImagePreviewMID)
+	{
+		ImagePreviewMID = UMaterialInstanceDynamic::Create(Mat, this);
+	}
+	if (ImagePreviewMID)
+	{
+		ImagePreviewMID->SetTextureParameterValue(TEXT("Image"), FinalTexture);
+		Plane->SetMaterial(0, ImagePreviewMID);
+		if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated preview plane with current image: %s"), *BaseName);
+	}
+}
+
+void USplatCreatorSubsystem::OnCanvasRenderTargetUpdate(UCanvas* Canvas, int32 Width, int32 Height)
+{
+	if (!Canvas) return;
+	UTexture2D* SourceTex = TextOverlaySourceTexture;
+	if (SourceTex && IsValid(SourceTex))
+	{
+		float TexW = SourceTex->GetSurfaceWidth();
+		float TexH = SourceTex->GetSurfaceHeight();
+		if (TexW > 0 && TexH > 0)
+		{
+			Canvas->DrawTile(SourceTex, 0, 0, Width, Height, 0, 0, TexW, TexH, BLEND_Opaque);
+		}
+	}
+	if (!TextOverlayDisplayText.IsEmpty())
+	{
+		UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+		if (Font)
+		{
+			Canvas->DrawColor = FColor::White;
+			Canvas->DrawText(Font, TextOverlayDisplayText, ImagePreviewTextPosition.X, ImagePreviewTextPosition.Y, ImagePreviewTextScale, ImagePreviewTextScale);
+		}
+	}
 }
 
 void USplatCreatorSubsystem::ScanForPLYFiles()
@@ -191,7 +341,7 @@ void USplatCreatorSubsystem::ScanForPLYFiles()
 	}
 	
 	IFileManager::Get().FindFiles(PlyFiles, *(AbsolutePath / TEXT("*.ply")), true, false);
-	PlyFiles.Sort();
+	// No sort - splats are chosen randomly, not alphabetically
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Found %d PLY files in %s"), PlyFiles.Num(), *AbsolutePath);
 }
@@ -199,6 +349,15 @@ void USplatCreatorSubsystem::ScanForPLYFiles()
 // ============================================================
 // CYCLE SPLATS
 // ============================================================
+
+void USplatCreatorSubsystem::CycleToNextSplat()
+{
+	// Only cycle when Comfy-frame-triggered mode is enabled (called by ComfyStreamActor)
+	if (bCycleSplatOnComfyFrame)
+	{
+		CycleToNextPLY();
+	}
+}
 
 void USplatCreatorSubsystem::CycleToNextPLY()
 {
@@ -208,7 +367,17 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 		if (PlyFiles.Num() == 0) return;
 	}
 	
-	CurrentFileIndex = (CurrentFileIndex + 1) % PlyFiles.Num();
+	// Use pre-chosen next index so the splat we show matches the image already sent to ComfyUI
+	if (NextFileIndex >= 0 && NextFileIndex < PlyFiles.Num())
+	{
+		CurrentFileIndex = NextFileIndex;
+	}
+	else
+	{
+		// Fallback if no next was set (e.g. first cycle or re-scan)
+		CurrentFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1);
+	}
+	
 	FString PLYPath = GetSplatCreatorFolder() / PlyFiles[CurrentFileIndex];
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycling to PLY: %s"), *PlyFiles[CurrentFileIndex]);
@@ -233,8 +402,16 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
             return;
         }
 
-	// Send matching image to ComfyUI on channel 2 when PLY changes (only sent when PLY changes)
-	TrySendImageToComfyUI(PLYPath);
+	// Display current splat's image on preview plane (the one we're loading now)
+	UpdateImagePreview(PLYPath);
+
+	// Send next upcoming PLY's image to ComfyUI so when we cycle to it, the received image matches the new splat
+	if (PlyFiles.Num() > 0)
+	{
+		NextFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1);
+		FString NextPLYPath = GetSplatCreatorFolder() / PlyFiles[NextFileIndex];
+		TrySendImageToComfyUI(NextPLYPath);
+	}
 
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed %d points from %s"), Positions.Num(), *PLYPath);
 	
@@ -809,7 +986,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	
 	// Store current point positions (scaled and offset) for dense region detection BEFORE broadcasting
 	// Apply the same offset as used for rendering
-	const FVector DownOffset = FVector(0.0f, 0.0f, 200.0f);
+	const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
 	CurrentPointPositions.Empty();
 	CurrentPointPositions.Reserve(ScaledPositions.Num());
 	for (const FVector& ScaledPos : ScaledPositions)

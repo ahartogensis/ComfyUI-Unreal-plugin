@@ -1,4 +1,6 @@
 #include "ComfyStream/ComfyStreamActor.h"
+#include "SplatCreator/SplatCreatorSubsystem.h"
+#include "Async/Async.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
@@ -96,7 +98,9 @@ void AComfyStreamActor::Tick(float DeltaTime)
 	else
 	{
 		// No interpolation - apply latest frame directly if available
-		if (LatestFrame.IsComplete())
+		// When FrameApplyDelaySeconds > 0, don't apply LatestFrame until the delay timer has fired (avoid bypassing delay)
+		bool bDelayPending = FrameApplyDelaySeconds > 0.0f && GetWorld() && GetWorld()->GetTimerManager().IsTimerActive(DelayedApplyTimer);
+		if (LatestFrame.IsComplete() && !bDelayPending)
 		{
 			ApplyTexturesToMaterial(LatestFrame);
 			FVector FixedPosition = GetActorLocation();
@@ -131,6 +135,10 @@ void AComfyStreamActor::Tick(float DeltaTime)
 
 void AComfyStreamActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(DelayedApplyTimer);
+	}
 	for (AActor* Actor : SpawnedTextureActors)
 	{
 		Actor->Destroy();
@@ -217,6 +225,15 @@ void AComfyStreamActor::HandleStreamError(const FString& Error)
 }
 
 
+// Helper: texture is safe to pass to material (avoids crash from corrupt PlatformData)
+static bool IsTextureSafeForMaterial(UTexture2D* Tex)
+{
+	if (!Tex || !IsValid(Tex)) return false;
+	FTexturePlatformData* PD = Tex->GetPlatformData();
+	if (!PD || reinterpret_cast<uintptr_t>(PD) == static_cast<uintptr_t>(-1)) return false;
+	return true;
+}
+
 void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 {
 	static const FName RGBParam  = TEXT("RGB_Map");
@@ -228,12 +245,11 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 		return;
 	}
 
-	// Set required textures (RGB and Mask) - both must be valid
-	if (!IsValid(Frame.RGB) || !IsValid(Frame.Mask))
+	// Set required textures (RGB and Mask) - both must be valid and safe (avoid corrupt PlatformData crash)
+	if (!IsValid(Frame.RGB) || !IsValid(Frame.Mask) ||
+	    !IsTextureSafeForMaterial(Frame.RGB) || !IsTextureSafeForMaterial(Frame.Mask))
 	{
-		if(debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] ApplyTexturesToMaterial called with invalid frame - RGB=%s, Mask=%s"), 
-			IsValid(Frame.RGB) ? TEXT("valid") : TEXT("NULL"),
-			IsValid(Frame.Mask) ? TEXT("valid") : TEXT("NULL"));
+		if (debug) UE_LOG(LogTemp, Warning, TEXT("[ComfyStreamActor] ApplyTexturesToMaterial skipping - frame textures invalid or unsafe"));
 		return;
 	}
 	
@@ -241,7 +257,7 @@ void AComfyStreamActor::ApplyTexturesToMaterial(const FComfyFrame& Frame)
 	DynMat->SetTextureParameterValue(MaskParam, Frame.Mask);
 	
 	// Set Depth if available (optional)
-	if (IsValid(Frame.Depth))
+	if (IsValid(Frame.Depth) && IsTextureSafeForMaterial(Frame.Depth))
 	{
 		DynMat->SetTextureParameterValue(DepthParam, Frame.Depth);
 	}
@@ -307,15 +323,16 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 		
 		if (bTexturesChanged)
 		{
-			// Ensure required textures (RGB and Mask) are valid before setting
-			if (IsValid(Frame.RGB) && IsValid(Frame.Mask))
+			// Ensure required textures (RGB and Mask) are valid and safe before setting (avoid corrupt PlatformData crash)
+			if (IsValid(Frame.RGB) && IsValid(Frame.Mask) &&
+			    IsTextureSafeForMaterial(Frame.RGB) && IsTextureSafeForMaterial(Frame.Mask))
 			{
 				//Set required textures
 				ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
 				ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
 				
 				//Set Depth if available (optional)
-				if (IsValid(Frame.Depth))
+				if (IsValid(Frame.Depth) && IsTextureSafeForMaterial(Frame.Depth))
 				{
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_Object"), Frame.Depth);
 				}
@@ -381,14 +398,15 @@ void AComfyStreamActor::SpawnTextureActor(const FComfyFrame& Frame, const FVecto
 			ActorDataPtr->Material = UMaterialInstanceDynamic::Create(BaseMaterial, Actor);
 			if (ActorDataPtr->Material)
 			{
-				// Ensure required textures (RGB and Mask) are valid before setting
-				if (IsValid(Frame.RGB) && IsValid(Frame.Mask))
+				// Ensure required textures (RGB and Mask) are valid and safe before setting
+				if (IsValid(Frame.RGB) && IsValid(Frame.Mask) &&
+				    IsTextureSafeForMaterial(Frame.RGB) && IsTextureSafeForMaterial(Frame.Mask))
 				{
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("RGB_Map"), Frame.RGB);
 					ActorDataPtr->Material->SetTextureParameterValue(TEXT("Mask_Map"), Frame.Mask);
 					
 					// Set Depth if available (optional)
-					if (IsValid(Frame.Depth))
+					if (IsValid(Frame.Depth) && IsTextureSafeForMaterial(Frame.Depth))
 					{
 						ActorDataPtr->Material->SetTextureParameterValue(TEXT("Depth_Map_Object"), Frame.Depth);
 					}
@@ -544,10 +562,38 @@ void AComfyStreamActor::DestroyActorDelayed(AActor* Actor)
 	// Actors will only be replaced when a new frame arrives
 }
 
+// Helper: returns true if texture can be safely used for pixel blending (has valid PlatformData + Mips)
+static bool CanSafelyBlendTexture(UTexture2D* Tex)
+{
+	if (!Tex || !IsValid(Tex)) return false;
+	FTexturePlatformData* PD = Tex->GetPlatformData();
+	// Reject null or common invalid sentinel (0xFFFFFFFFFFFFFFFF) that can cause access violations
+	if (!PD || reinterpret_cast<uintptr_t>(PD) == static_cast<uintptr_t>(-1)) return false;
+	if (PD->Mips.Num() <= 0) return false;
+	return true;
+}
+
 void AComfyStreamActor::GenerateInterpolatedFrames(const FComfyFrame& FromFrame, const FComfyFrame& ToFrame)
 {
 	if (!bEnableInterpolation || NumInterpolatedFrames <= 0)
 	{
+		return;
+	}
+
+	// If RGB textures can't be safely blended (runtime/ComfyUI textures often lack valid PlatformData),
+	// skip interpolation and apply the new frame directly to avoid crashes in BlendTextures
+	if (!CanSafelyBlendTexture(FromFrame.RGB) || !CanSafelyBlendTexture(ToFrame.RGB) ||
+	    !CanSafelyBlendTexture(FromFrame.Mask) || !CanSafelyBlendTexture(ToFrame.Mask))
+	{
+		InterpolationQueue.Empty();
+		if (ToFrame.IsComplete())
+		{
+			FInterpolatedFrame FinalFrame;
+			FinalFrame.Frame = ToFrame;
+			FinalFrame.TimeRemaining = 0.0f;
+			InterpolationQueue.Add(FinalFrame);
+		}
+		if (debug) UE_LOG(LogTemp, Display, TEXT("[ComfyStreamActor] Skipping interpolation - textures not blendable (using instant transition)"));
 		return;
 	}
 
@@ -638,7 +684,18 @@ void AComfyStreamActor::GenerateInterpolatedFrames(const FComfyFrame& FromFrame,
 
 UTexture2D* AComfyStreamActor::BlendTextures(UTexture2D* TextureA, UTexture2D* TextureB, float Alpha)
 {
-	if (!IsValid(TextureA) || !IsValid(TextureB))
+	if (!TextureA || !TextureB || !IsValid(TextureA) || !IsValid(TextureB))
+	{
+		return Alpha >= 0.5f ? TextureB : TextureA;
+	}
+
+	// Runtime/dynamic textures may not have PlatformData - skip pixel blend and fallback to source
+	// Also reject invalid sentinel pointer (0xFFFFFFFFFFFFFFFF) that causes access violations
+	FTexturePlatformData* PDA = TextureA->GetPlatformData();
+	FTexturePlatformData* PDB = TextureB->GetPlatformData();
+	if (!PDA || !PDB ||
+	    reinterpret_cast<uintptr_t>(PDA) == static_cast<uintptr_t>(-1) ||
+	    reinterpret_cast<uintptr_t>(PDB) == static_cast<uintptr_t>(-1))
 	{
 		return Alpha >= 0.5f ? TextureB : TextureA;
 	}
@@ -822,28 +879,82 @@ void AComfyStreamActor::HandleFullFrame(const FComfyFrame& Frame)
 	// Only update actor if this is a new complete frame ready to replace the current one
 	if (bIsNewFrame)
 	{
-		// Generate interpolated frames if interpolation is enabled and we have a previous frame
-		if (bEnableInterpolation && PreviousFrame.IsComplete() && NumInterpolatedFrames > 0)
+		// Notify SplatCreator to cycle splat when a new Comfy frame is received (if enabled)
+		// Always dispatch to GameThread to avoid threading issues (e.g. if delegate ever fires from another thread)
+		if (UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr)
 		{
-			GenerateInterpolatedFrames(PreviousFrame, Frame);
-			InterpolationTimer = 0.0f;
+			if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
+			{
+				AsyncTask(ENamedThreads::GameThread, [SplatSubsystem]()
+				{
+					if (IsValid(SplatSubsystem))
+					{
+						SplatSubsystem->CycleToNextSplat();
+					}
+				});
+			}
+		}
+
+		if (FrameApplyDelaySeconds > 0.0f)
+		{
+			// Delayed apply: store frame and set timer (for 2nd/3rd actor staggered display)
+			UWorld* World = GetWorld();
+			if (World)
+			{
+				World->GetTimerManager().ClearTimer(DelayedApplyTimer);
+				PendingDelayedFrame = Frame;
+				World->GetTimerManager().SetTimer(
+					DelayedApplyTimer,
+					this,
+					&AComfyStreamActor::ApplyDelayedFrame,
+					FrameApplyDelaySeconds,
+					false);
+			}
 		}
 		else
 		{
-			// No interpolation - apply frame directly
-			ApplyTexturesToMaterial(Frame);
-			FVector FixedPosition = GetActorLocation();
-			SpawnTextureActor(Frame, FixedPosition);
+			// Immediate apply
+			ApplyNewFrame(Frame);
 		}
-		
-		// Update previous frame for next interpolation
-		PreviousFrame = Frame;
-		
-		// Update last applied frame
-		LastAppliedFrame = Frame;
 	}
 	else
 	{
 		if(debug) UE_LOG(LogTemp, Verbose, TEXT("[ComfyStreamActor] Frame unchanged, skipping update"));
 	}
+}
+
+void AComfyStreamActor::ApplyDelayedFrame()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(DelayedApplyTimer);
+	}
+	if (!PendingDelayedFrame.IsComplete())
+	{
+		return;
+	}
+	ApplyNewFrame(PendingDelayedFrame);
+}
+
+void AComfyStreamActor::ApplyNewFrame(const FComfyFrame& Frame)
+{
+	// Generate interpolated frames if interpolation is enabled and we have a previous frame
+	if (bEnableInterpolation && PreviousFrame.IsComplete() && NumInterpolatedFrames > 0)
+	{
+		GenerateInterpolatedFrames(PreviousFrame, Frame);
+		InterpolationTimer = 0.0f;
+	}
+	else
+	{
+		// No interpolation - apply frame directly
+		ApplyTexturesToMaterial(Frame);
+		FVector FixedPosition = GetActorLocation();
+		SpawnTextureActor(Frame, FixedPosition);
+	}
+
+	// Update previous frame for next interpolation
+	PreviousFrame = Frame;
+
+	// Update last applied frame
+	LastAppliedFrame = Frame;
 }

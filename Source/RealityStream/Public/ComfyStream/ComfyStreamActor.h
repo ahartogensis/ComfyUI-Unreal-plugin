@@ -51,6 +51,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Actor Spawning")
 	float FadeOutDuration = 0.5f;
 
+	// Delay before applying new frames (for staggered multi-actor setups). 0 = apply immediately.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ComfyStream", meta = (ClampMin = "0.0", Tooltip = "Seconds to wait before applying a new frame. Use 0 for first actor, higher values for 2nd/3rd actors for delayed change."))
+	float FrameApplyDelaySeconds = 0.0f;
+
 	//Frame interpolation settings
 	// Generates intermediate blended frames between consecutive frames for smoother transitions
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Frame Interpolation", meta = (Tooltip = "Enable frame interpolation to generate smooth transitions between frames"))
@@ -106,6 +110,10 @@ private:
 	TArray<FInterpolatedFrame> InterpolationQueue;
 	float InterpolationTimer = 0.0f;
 
+	// Delayed frame apply (when FrameApplyDelaySeconds > 0)
+	FComfyFrame PendingDelayedFrame;
+	FTimerHandle DelayedApplyTimer;
+
 	//sequence index for textures 
 	int32 SeqIndex = 0;
 	
@@ -140,8 +148,13 @@ private:
 	//When FrameBuffer emits a complete triplet
 	UFUNCTION() void HandleFullFrame(const FComfyFrame& Frame);
 
+	//Timer callback for delayed frame apply
+	UFUNCTION() void ApplyDelayedFrame();
+
 	//Apply textures to the material
 	void ApplyTexturesToMaterial(const FComfyFrame& Frame);
+	// Shared apply path (immediate or from delayed callback)
+	void ApplyNewFrame(const FComfyFrame& Frame);
 	//Spawn actor at specified world position
 	void SpawnTextureActor(const FComfyFrame& Frame, const FVector& WorldPosition);
 	
