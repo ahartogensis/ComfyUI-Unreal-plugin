@@ -4,9 +4,7 @@
 #include "Engine/Texture2D.h"
 #include "Modules/ModuleManager.h"
 
-//Decodes PNG and JPEG images into UTexture2D
-//Assume depth images are DepthAnything PNGs
-//Use UE's built-in image wrapper module for decoding
+// Decodes PNG images into UTexture2D
 UTexture2D* UComfyPngDecoder::DecodePNGToTexture(const TArray<uint8>& PNGData)
 {
 	return DecodePNGToTextureWithFormat(PNGData, PF_R8G8B8A8);
@@ -22,13 +20,9 @@ UTexture2D* UComfyPngDecoder::DecodePNGToTextureWithFormat(const TArray<uint8>& 
 	IImageWrapperModule& ImageWrapperModule = 
 		FModuleManager::LoadModuleChecked<IImageWrapperModule>("ImageWrapper");
 
-		//detect either PNG or JPEG
-	EImageFormat Format =
-		IsValidPNGData(PNGData) ? EImageFormat::PNG :
-		(IsValidJPEGData(PNGData) ? EImageFormat::JPEG : EImageFormat::Invalid);
-	
-	if (Format == EImageFormat::Invalid)
+	if (!IsValidPNGData(PNGData))
 		return nullptr;
+	EImageFormat Format = EImageFormat::PNG;
 
 	//create wrapper for format then parse data 
 	TSharedPtr<IImageWrapper> Wrapper = ImageWrapperModule.CreateImageWrapper(Format);
@@ -139,8 +133,4 @@ UTexture2D* UComfyPngDecoder::CreateTextureFromData(const TArray<uint8>& Data, i
 
 bool UComfyPngDecoder::IsValidPNGData(const TArray<uint8>& Data) {
 	return Data.Num() >= 8 && FMemory::Memcmp(Data.GetData(), "\x89PNG\r\n\x1A\n", 8) == 0;
-}
-
-bool UComfyPngDecoder::IsValidJPEGData(const TArray<uint8>& Data) {
-	return Data.Num() >= 3 && Data[0] == 0xFF && Data[1] == 0xD8 && Data[2] == 0xFF;
 }

@@ -177,11 +177,9 @@ void UHyper3DObjectsSubsystem::UpdateFromSplatDimensions()
 				return;
 			}
 
-			FVector2D SplatDimensions = SplatSubsystem->GetSplatDimensions();
-			
 			// Use splat dimensions only to constrain the box size
 			const float DesiredBoxSize = 200.0f;
-			float SplatBoxSize = FMath::Min(SplatDimensions.X, SplatDimensions.Y);
+			float SplatBoxSize = FMath::Min(BoxSizeVector.X, BoxSizeVector.Y);
 			
 			if (SplatBoxSize > 0.0f)
 			{

@@ -18,7 +18,7 @@ class REALITYSTREAM_API UComfyImageSender : public UObject
 public:
 	UComfyImageSender();
 
-	/** Send an image (PNG or JPG bytes) to ComfyUI on the configured channel. */
+	/** Send PNG image bytes to ComfyUI on the configured channel. */
 	UFUNCTION(BlueprintCallable, Category = "ComfyUI")
 	void SendImage(const TArray<uint8>& ImageData);
 

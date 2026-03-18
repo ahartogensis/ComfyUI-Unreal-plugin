@@ -11,7 +11,7 @@
 #include "Misc/Paths.h"
 #include "GameFramework/Actor.h"
 #include "Engine/StaticMesh.h"
-#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Camera/PlayerCameraManager.h"
@@ -21,9 +21,7 @@
 #include "Math/RotationMatrix.h"
 #include "Math/RandomStream.h"
 #include "Math/Box.h"
-
-int debug = 0; //0 = off, 1 = on
-
+int debug = 0; // 0 = off, 1 = on
 
 // ============================================================
 // Initialize
@@ -79,10 +77,10 @@ void USplatCreatorSubsystem::StartPointCloudSystem()
 			CycleTimer,
 			this,
 			&USplatCreatorSubsystem::CycleToNextPLY,
-			10.0f,
+			CycleIntervalSeconds,
 			true
 		);
-		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every 10 seconds"));
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle timer started - will change PLY every %.1f seconds"), CycleIntervalSeconds);
 	}
 	else
 	{
@@ -100,9 +98,13 @@ void USplatCreatorSubsystem::Deinitialize()
 	{
 		World->GetTimerManager().ClearTimer(CycleTimer);
 	}
-	if (MorphTimer.IsValid() && World)
+	if (PlaneMorphTimer.IsValid() && World)
 	{
-		World->GetTimerManager().ClearTimer(MorphTimer);
+		World->GetTimerManager().ClearTimer(PlaneMorphTimer);
+	}
+	if (MorphStartDelayTimer.IsValid() && World)
+	{
+		World->GetTimerManager().ClearTimer(MorphStartDelayTimer);
 	}
 	if (BobbingTimer.IsValid() && World)
 	{
@@ -120,6 +122,10 @@ void USplatCreatorSubsystem::Deinitialize()
 	{
 		ComfyImageSender->Disconnect();
 	}
+	if (World)
+	{
+		World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
+	}
 	Super::Deinitialize();
 }
 
@@ -132,10 +138,12 @@ void USplatCreatorSubsystem::SetImagePreviewTarget(UPrimitiveComponent* PlaneCom
 	ImagePreviewPlaneComponent = PlaneComponent;
 	ImagePreviewMaterial = Material; // nullptr = will load from ImagePreviewMaterialPath when needed
 	ImagePreviewMID = nullptr; // Will be created when we first display an image
-	if (debug && PlaneComponent)
-	{
-		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Image preview target set - plane will display ComfyUI-bound image"));
-	}
+	if (debug && PlaneComponent) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Image preview target set - plane will display ComfyUI-bound image"));
+}
+
+void USplatCreatorSubsystem::SetSendCurrentSplatImageToComfyUI(bool bSendCurrent)
+{
+	bSendCurrentSplatImageToComfyUI = bSendCurrent;
 }
 
 FString USplatCreatorSubsystem::GetSplatCreatorFolder() const
@@ -149,12 +157,12 @@ void USplatCreatorSubsystem::TrySendImageToComfyUI(const FString& PLYPath)
 {
 	if (!bSendImageToComfyUIOnPlyChange)
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[SplatCreator] Image send disabled (bSendImageToComfyUIOnPlyChange=false)"));
+		if (debug) UE_LOG(LogTemp, Verbose, TEXT("[SplatCreator] Image send disabled (bSendImageToComfyUIOnPlyChange=false)"));
 		return;
 	}
 	if (ComfyUIWebSocketHost.IsEmpty())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] ComfyUIWebSocketHost is empty - cannot send image. Set it (e.g. 'localhost') in Blueprint or code."));
+		if (debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] ComfyUIWebSocketHost is empty - cannot send image. Set it (e.g. 'localhost') in Blueprint or code."));
 		return;
 	}
 
@@ -162,26 +170,17 @@ void USplatCreatorSubsystem::TrySendImageToComfyUI(const FString& PLYPath)
 	FString BaseName = FPaths::GetBaseFilename(PLYPath);
 	FString Dir = FPaths::GetPath(PLYPath);
 
-	// Try .jpg first, then .png
-	FString ImagePath;
-	if (FPaths::FileExists(Dir / (BaseName + TEXT(".jpg"))))
+	FString ImagePath = Dir / (BaseName + TEXT(".png"));
+	if (!FPaths::FileExists(ImagePath))
 	{
-		ImagePath = Dir / (BaseName + TEXT(".jpg"));
-	}
-	else if (FPaths::FileExists(Dir / (BaseName + TEXT(".png"))))
-	{
-		ImagePath = Dir / (BaseName + TEXT(".png"));
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No matching image (.jpg/.png) for PLY '%s' in %s - ensure image has same name as PLY"), *BaseName, *Dir);
+		if (debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No matching .png image for PLY '%s' in %s - ensure image has same name as PLY"), *BaseName, *Dir);
 		return;
 	}
 
 	TArray<uint8> ImageData;
 	if (!FFileHelper::LoadFileToArray(ImageData, *ImagePath))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Failed to load image: %s"), *ImagePath);
+		if (debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Failed to load image: %s"), *ImagePath);
 		return;
 	}
 
@@ -191,7 +190,7 @@ void USplatCreatorSubsystem::TrySendImageToComfyUI(const FString& PLYPath)
 	}
 
 	FString ServerURL = FString::Printf(TEXT("ws://%s:8001"), *ComfyUIWebSocketHost);
-	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Sending image to ComfyUI %s channel %d (%d bytes)"), *ServerURL, ComfyUIImageChannel, ImageData.Num());
+	if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Sending image to ComfyUI %s channel %d (%d bytes)"), *ServerURL, ComfyUIImageChannel, ImageData.Num());
 	ComfyImageSender->ConfigureAndSend(ServerURL, ComfyUIImageChannel, ImageData);
 }
 
@@ -216,17 +215,8 @@ void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 
 	FString BaseName = FPaths::GetBaseFilename(PLYPath);
 	FString Dir = FPaths::GetPath(PLYPath);
-
-	FString ImagePath;
-	if (FPaths::FileExists(Dir / (BaseName + TEXT(".jpg"))))
-	{
-		ImagePath = Dir / (BaseName + TEXT(".jpg"));
-	}
-	else if (FPaths::FileExists(Dir / (BaseName + TEXT(".png"))))
-	{
-		ImagePath = Dir / (BaseName + TEXT(".png"));
-	}
-	else
+	FString ImagePath = Dir / (BaseName + TEXT(".png"));
+	if (!FPaths::FileExists(ImagePath))
 	{
 		return;
 	}
@@ -267,6 +257,7 @@ void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 					CanvasRenderTargetForText = UCanvasRenderTarget2D::CreateCanvasRenderTarget2D(World, UCanvasRenderTarget2D::StaticClass(), TexW, TexH);
 					if (CanvasRenderTargetForText)
 					{
+						CanvasRenderTargetForText->ClearColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);  // Opaque white clear - avoids translucent result when material multiplies by texture alpha
 						CanvasRenderTargetForText->OnCanvasRenderTargetUpdate.AddDynamic(this, &USplatCreatorSubsystem::OnCanvasRenderTargetUpdate);
 					}
 				}
@@ -293,8 +284,54 @@ void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 	if (ImagePreviewMID)
 	{
 		ImagePreviewMID->SetTextureParameterValue(TEXT("Image"), FinalTexture);
+		ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
 		Plane->SetMaterial(0, ImagePreviewMID);
+
+		if (bFadeImagePreviewOpacity)
+		{
+			UWorld* World = GetWorld();
+			if (World)
+			{
+				World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
+				ImagePreviewOpacityFadeStartTime = World->GetTimeSeconds();
+				World->GetTimerManager().SetTimer(ImagePreviewOpacityFadeTimer, this, &USplatCreatorSubsystem::UpdateImagePreviewOpacityFade, 1.0f / 30.0f, true);
+			}
+		}
+
 		if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated preview plane with current image: %s"), *BaseName);
+	}
+}
+
+void USplatCreatorSubsystem::UpdateImagePreviewOpacityFade()
+{
+	UWorld* World = GetWorld();
+	if (!World || !ImagePreviewMID) return;
+
+	float Elapsed = World->GetTimeSeconds() - ImagePreviewOpacityFadeStartTime;
+	float OpacityValue = 1.0f;
+	// Hold at full opacity for ImagePreviewOpacityHoldDuration, then fade over ImagePreviewOpacityFadeDuration
+	if (Elapsed < ImagePreviewOpacityHoldDuration)
+	{
+		OpacityValue = 1.0f;
+		ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), OpacityValue);
+	}
+	else
+	{
+		float FadeElapsed = Elapsed - ImagePreviewOpacityHoldDuration;
+		if (FadeElapsed >= ImagePreviewOpacityFadeDuration)
+		{
+			OpacityValue = 0.0f;
+			ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), OpacityValue);
+			World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
+			return;
+		}
+		OpacityValue = 1.0f - (FadeElapsed / ImagePreviewOpacityFadeDuration);
+		ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), OpacityValue);
+	}
+	// Force render update so opacity changes apply immediately
+	if (UPrimitiveComponent* Plane = ImagePreviewPlaneComponent.Get())
+	{
+		Plane->MarkRenderStateDirty();
 	}
 }
 
@@ -313,11 +350,25 @@ void USplatCreatorSubsystem::OnCanvasRenderTargetUpdate(UCanvas* Canvas, int32 W
 	}
 	if (!TextOverlayDisplayText.IsEmpty())
 	{
-		UFont* Font = GEngine ? GEngine->GetMediumFont() : nullptr;
+		UFont* Font = GEngine ? GEngine->GetLargeFont() : nullptr;
+		if (!Font && GEngine) Font = GEngine->GetMediumFont();
 		if (Font)
 		{
+			const float X = ImagePreviewTextPosition.X;
+			const float Y = ImagePreviewTextPosition.Y;
+			const float S = ImagePreviewTextScale;
+			FFontRenderInfo RenderInfo;
+			Canvas->DrawColor = FColor::Black;
+			Canvas->DrawText(Font, TextOverlayDisplayText, X + 2.0f, Y + 2.0f, S, S, RenderInfo);  // shadow
+			{
+				const float O = 1.5f;
+				Canvas->DrawText(Font, TextOverlayDisplayText, X - O, Y, S, S, RenderInfo);
+				Canvas->DrawText(Font, TextOverlayDisplayText, X + O, Y, S, S, RenderInfo);
+				Canvas->DrawText(Font, TextOverlayDisplayText, X, Y - O, S, S, RenderInfo);
+				Canvas->DrawText(Font, TextOverlayDisplayText, X, Y + O, S, S, RenderInfo);
+			}  // outline
 			Canvas->DrawColor = FColor::White;
-			Canvas->DrawText(Font, TextOverlayDisplayText, ImagePreviewTextPosition.X, ImagePreviewTextPosition.Y, ImagePreviewTextScale, ImagePreviewTextScale);
+			Canvas->DrawText(Font, TextOverlayDisplayText, X, Y, S, S, RenderInfo);
 		}
 	}
 }
@@ -374,8 +425,16 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 	}
 	else
 	{
-		// Fallback if no next was set (e.g. first cycle or re-scan)
-		CurrentFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1);
+		// Fallback if no next was set (e.g. first cycle or re-scan) - pick a different splat
+		if (PlyFiles.Num() <= 1)
+		{
+			CurrentFileIndex = 0;
+		}
+		else
+		{
+			int32 PrevIndex = CurrentFileIndex;
+			do { CurrentFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1); } while (CurrentFileIndex == PrevIndex);
+		}
 	}
 	
 	FString PLYPath = GetSplatCreatorFolder() / PlyFiles[CurrentFileIndex];
@@ -390,6 +449,12 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 
 void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 {
+	// Clear any pending morph delay (new cycle supersedes it)
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(MorphStartDelayTimer);
+	}
+
 	// Reset all transformations to normal when loading a new PLY file
 	ResetToNormal();
 	
@@ -405,12 +470,20 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 	// Display current splat's image on preview plane (the one we're loading now)
 	UpdateImagePreview(PLYPath);
 
-	// Send next upcoming PLY's image to ComfyUI so when we cycle to it, the received image matches the new splat
+	// Send image to ComfyUI: either current splat or next (based on bSendCurrentSplatImageToComfyUI)
 	if (PlyFiles.Num() > 0)
 	{
-		NextFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1);
-		FString NextPLYPath = GetSplatCreatorFolder() / PlyFiles[NextFileIndex];
-		TrySendImageToComfyUI(NextPLYPath);
+		// Pick next index for cycle logic (used when we cycle to next splat)
+		if (PlyFiles.Num() <= 1)
+		{
+			NextFileIndex = 0;
+		}
+		else
+		{
+			do { NextFileIndex = FMath::RandRange(0, PlyFiles.Num() - 1); } while (NextFileIndex == CurrentFileIndex);
+		}
+		FString ImageToSendPath = bSendCurrentSplatImageToComfyUI ? PLYPath : (GetSplatCreatorFolder() / PlyFiles[NextFileIndex]);
+		TrySendImageToComfyUI(ImageToSendPath);
 	}
 
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Parsed %d points from %s"), Positions.Num(), *PLYPath);
@@ -431,55 +504,8 @@ void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Filtering removed all points, using original"));
 	}
 
-	// Create or morph point cloud
-	if (PointCloudComponent && bIsMorphing == false)
-	{
-		// Start smooth morphing between point clouds
-		OldPositions.Empty();
-		OldColors.Empty();
-		
-		// Get current positions
-		int32 InstanceCount = PointCloudComponent->GetInstanceCount();
-		for (int32 i = 0; i < InstanceCount; i++)
-		{
-			FTransform Transform;
-			if (PointCloudComponent->GetInstanceTransform(i, Transform))
-			{
-				OldPositions.Add(Transform.GetLocation());
-				OldColors.Add(FColor::White); // Use white as default, colors will interpolate
-			}
-		}
-		
-		// Scale positions for display (PLY coordinates are typically small)
-		NewPositions.Empty();
-		NewPositions.Reserve(Positions.Num());
-		const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
-		for (const FVector& Pos : Positions)
-		{
-			NewPositions.Add(Pos * 125.0f + DownOffset); // Scale by 125x and apply offset
-		}
-		NewColors = Colors;
-		
-		// Calculate adaptive sphere sizes for new positions (already scaled)
-		CalculateAdaptiveSphereSizes(NewPositions, SphereSizes);
-		
-		MorphProgress = 0.0f;
-		MorphUpdateIndex = 0;
-		bIsMorphing = true;
-		
-		if (UWorld* World = GetWorld())
-		{
-			MorphStartTime = World->GetTimeSeconds();
-    		World->GetTimerManager().SetTimer(MorphTimer,this,&USplatCreatorSubsystem::UpdateMorph,
-				0.033f, // ~30fps update rate for better performance
-				true);
-        }
-    }
-    else
-    {
-		// Create new point cloud
-		CreatePointCloud(Positions, Colors);
-	}
+	// Create new point cloud with plane morph (GPU-based flat->3D transition)
+	CreatePointCloud(Positions, Colors);
 }
 
 bool USplatCreatorSubsystem::ParsePLYFile(const FString& PLYPath, TArray<FVector>& OutPositions, TArray<FColor>& OutColors)
@@ -829,9 +855,17 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	// Destroy old actor
 	if (CurrentPointCloudActor)
 	{
+		if (PlaneMorphTimer.IsValid() && World)
+		{
+			World->GetTimerManager().ClearTimer(PlaneMorphTimer);
+		}
+		bIsPlaneMorphing = false;
+		SplatMorphMID = nullptr;
 		CurrentPointCloudActor->Destroy();
 	}
 	
+	PointCloudComponent = nullptr;
+
 	// Create new actor
 	CurrentPointCloudActor = World->SpawnActor<AActor>();
 	if (!CurrentPointCloudActor) return;
@@ -840,17 +874,80 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	if (!SphereMesh) return;
 	
-	// Create HISM component
-	PointCloudComponent = NewObject<UHierarchicalInstancedStaticMeshComponent>(CurrentPointCloudActor);
+	// Load plane morph material
+	UMaterialInterface* Material = nullptr;
+	bool bMorphMaterialLoaded = false;
+	{
+		UObject* Loaded = PlaneMorphMaterialPath.TryLoad();
+		Material = Cast<UMaterialInterface>(Loaded);
+		if (!Material) Material = LoadObject<UMaterialInterface>(nullptr, *PlaneMorphMaterialPath.ToString());
+		bMorphMaterialLoaded = (Material != nullptr);
+	}
+	if (!Material) Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
+	if (!bMorphMaterialLoaded && debug)
+		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Plane morph material not found at %s - using direct 3D display."), *PlaneMorphMaterialPath.ToString());
+	
+	// Precompute scaled positions and sphere sizes (needed for both paths)
+	TArray<FVector> ScaledPositions;
+	ScaledPositions.Reserve(Positions.Num());
+	for (const FVector& Pos : Positions) ScaledPositions.Add(Pos * 125.0f);
+	CalculateAdaptiveSphereSizes(ScaledPositions, SphereSizes);
+	const float FlatPlaneY = -PlaneMorphY;
+	const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
+	const int32 NumInstances = FMath::Min(Positions.Num(), Colors.Num());
+	
+	// Create DynamicMaterial
+	if (!Material)
+	{
+		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Material not found, trying fallback"));
+		Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	}
+	UMaterialInterface* MatToUse = nullptr;
+	if (Material)
+	{
+		if (UMaterialInstanceDynamic* DynMat = UMaterialInstanceDynamic::Create(Material, CurrentPointCloudActor))
+		{
+			SplatMorphMID = DynMat;
+			MatToUse = DynMat;
+			if (bMorphMaterialLoaded) DynMat->SetScalarParameterValue(TEXT("MorphProgress"), 0.0f);  // 0 = flat at start
+			DynMat->SetVectorParameterValue(TEXT("EmissiveColor"), FLinearColor(0.4f, 0.4f, 0.4f, 1.0f));
+			DynMat->SetScalarParameterValue(TEXT("EmissiveIntensity"), 1.0f);
+			DynMat->SetScalarParameterValue(TEXT("Emissive"), 1.0f);
+			DynMat->SetScalarParameterValue(TEXT("BloomIntensity"), 1.0f);
+			DynMat->SetScalarParameterValue(TEXT("GlowRadius"), 4.0f);
+			DynMat->SetScalarParameterValue(TEXT("GlowIntensity"), 1.0f);
+			DynMat->SetScalarParameterValue(TEXT("BloomScale"), 2.0f);
+			DynMat->SetScalarParameterValue(TEXT("GlowScale"), 2.0f);
+			DynMat->SetScalarParameterValue(TEXT("Contrast"), 1.5f);
+			DynMat->SetScalarParameterValue(TEXT("Saturation"), 1.3f);
+			DynMat->SetScalarParameterValue(TEXT("Brightness"), 1.1f);
+			DynMat->SetScalarParameterValue(TEXT("ColorMultiplier"), 1.2f);
+			DynMat->SetScalarParameterValue(TEXT("ContrastAmount"), 1.5f);
+			DynMat->SetScalarParameterValue(TEXT("SaturationAmount"), 1.3f);
+			DynMat->SetScalarParameterValue(TEXT("ColorIntensity"), 1.2f);
+			DynMat->SetScalarParameterValue(TEXT("Intensity"), 1.2f);
+			DynMat->SetScalarParameterValue(TEXT("Vibrance"), 1.3f);
+		}
+		else { SplatMorphMID = nullptr; MatToUse = Material; }
+	}
+	else { SplatMorphMID = nullptr; }
+	
+	// Create ISM component (plain ISM - bounds match geometry for visibility when camera is inside)
+	// Create ISM component (plain ISM to avoid HISM's aggressive internal culling when camera is inside)
+	PointCloudComponent = NewObject<UInstancedStaticMeshComponent>(CurrentPointCloudActor);
 	PointCloudComponent->SetStaticMesh(SphereMesh);
-	PointCloudComponent->SetNumCustomDataFloats(4);
+	// Plane morph uses custom data slot 4 for Y offset (negated: FlatY - TargetY for 180° yaw / world-space WPO)
+	PointCloudComponent->SetNumCustomDataFloats(5);  // slot 4 for plane morph Y offset
 	PointCloudComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	PointCloudComponent->SetCastShadow(false);
 	PointCloudComponent->SetVisibility(true);
 	PointCloudComponent->SetHiddenInGame(false);
 	
-	// Disable all culling to prevent points from disappearing
-	PointCloudComponent->SetCullDistances(0, 0); // No near cull, no far cull
+	// Disable all distance culling - critical for visibility when camera is inside the cloud
+	PointCloudComponent->SetCullDistances(0, 0);
+	PointCloudComponent->InstanceMinDrawDistance = 0;  // Allow instances at any distance (including very close)
+	PointCloudComponent->bNeverDistanceCull = true;   // Bypass primitive-level distance culling
+	PointCloudComponent->bAllowCullDistanceVolume = false;  // Ignore Cull Distance Volumes in the level
 	PointCloudComponent->SetCanEverAffectNavigation(false);
 	PointCloudComponent->SetReceivesDecals(false);
 	
@@ -858,8 +955,7 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	PointCloudComponent->SetVisibility(true);
 	PointCloudComponent->SetHiddenInGame(false);
 	
-	// HISM-specific settings to reduce aggressive culling
-	// These help prevent instances from being culled when looking straight on
+	// ISM settings
 	PointCloudComponent->bDisableCollision = true;
 	PointCloudComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	
@@ -871,87 +967,27 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	PointCloudComponent->bUseAsOccluder = false;
 	PointCloudComponent->SetTranslucentSortPriority(1); // Higher priority for better sorting
 	
-	// Set material to see colors
-	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/_GENERATED/Materials/M_VertexColor.M_VertexColor"));
-	if (!Material)
-	{
-		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Material M_VertexColor not found at /Game/_GENERATED/Materials/, trying fallback"));
-		Material = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	}
-	if (Material)
-	{
-		// Try to create a Material Instance Dynamic to enhance visibility and contrast
-		UMaterialInstanceDynamic* DynamicMaterial = UMaterialInstanceDynamic::Create(Material, CurrentPointCloudActor);
-		if (DynamicMaterial)
-		{
-			// Lower emissive intensity while maintaining radius (sphere sizes)
-			// Try common emissive parameter names
-			DynamicMaterial->SetVectorParameterValue(TEXT("EmissiveColor"), FLinearColor(0.4f, 0.4f, 0.4f, 1.0f));
-			DynamicMaterial->SetScalarParameterValue(TEXT("EmissiveIntensity"), 1.0f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("Emissive"), 1.0f);
-			// Try bloom/glow radius parameters if they exist
-			DynamicMaterial->SetScalarParameterValue(TEXT("BloomIntensity"), 1.0f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("GlowRadius"), 4.0f); // Keep radius
-			DynamicMaterial->SetScalarParameterValue(TEXT("GlowIntensity"), 1.0f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("BloomScale"), 2.0f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("GlowScale"), 2.0f);
-			
-			// Add contrast and color enhancement parameters
-			// Try common parameter names - these will only apply if the material has these parameters exposed
-			DynamicMaterial->SetScalarParameterValue(TEXT("Contrast"), 1.5f); // Increase contrast (1.0 = no change, >1.0 = more contrast)
-			DynamicMaterial->SetScalarParameterValue(TEXT("Saturation"), 1.3f); // Increase saturation for more vibrant colors
-			DynamicMaterial->SetScalarParameterValue(TEXT("Brightness"), 1.1f); // Slight brightness boost
-			DynamicMaterial->SetScalarParameterValue(TEXT("ColorMultiplier"), 1.2f); // Color intensity multiplier
-			
-			// Try alternative parameter names that might exist in the material
-			DynamicMaterial->SetScalarParameterValue(TEXT("ContrastAmount"), 1.5f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("SaturationAmount"), 1.3f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("ColorIntensity"), 1.2f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("Intensity"), 1.2f);
-			DynamicMaterial->SetScalarParameterValue(TEXT("Vibrance"), 1.3f);
-			
-			PointCloudComponent->SetMaterial(0, DynamicMaterial);
-			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created Material Instance Dynamic with emissive and contrast properties"));
-		}
-		else
-		{
-			PointCloudComponent->SetMaterial(0, Material);
-			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Set material: %s (failed to create MID)"), *Material->GetName());
-		}
-	}
-	else
-	{
-		if(debug) UE_LOG(LogTemp, Error, TEXT("[SplatCreator] Failed to load material"));
-	}
+	// Set material on single component (MatToUse created before branch)
+	if (MatToUse) PointCloudComponent->SetMaterial(0, MatToUse);
+	else if (Material) PointCloudComponent->SetMaterial(0, Material);
+	if (Material && !Material->IsTwoSided() && bVisibleFromInside) PointCloudComponent->SetReverseCulling(true);
 	
 	// Set component as root BEFORE registering (critical for proper bounds calculation)
 	CurrentPointCloudActor->SetRootComponent(PointCloudComponent);
 	
-	CurrentPointCloudActor->SetActorLocation(FVector(0.0f, 0.0f, -150.0f));
-	CurrentPointCloudActor->SetActorRotation(FRotator(0.0f, 0.0f, 180.0f)); 
-	
-	FVector ActorLoc = CurrentPointCloudActor->GetActorLocation();
-	FRotator ActorRot = CurrentPointCloudActor->GetActorRotation();
+	// Actor transform - location and rotation apply to the entire point cloud
+	CurrentPointCloudActor->SetActorLocation(FVector(0.0f, -100.0f, -150.0f));
+	CurrentPointCloudActor->SetActorRotation(FRotator(0.0f, 0.0f, 180.0f));
 
 	// Register component (must be done after setting as root component)
 	PointCloudComponent->RegisterComponent();
 	
-	// Force HISM to always render (disable all forms of culling)
+	// Force ISM to always render (disable all forms of culling)
 	PointCloudComponent->SetCanEverAffectNavigation(false);
 	
-	// Calculate adaptive sphere sizes based on point density
-	// Scale positions first (same scaling as used for rendering: 125.0f)
-	TArray<FVector> ScaledPositions;
-	ScaledPositions.Reserve(Positions.Num());
-	for (const FVector& Pos : Positions)
-	{
-		ScaledPositions.Add(Pos * 125.0f);
-	}
-	CalculateAdaptiveSphereSizes(ScaledPositions, SphereSizes);
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Calculated %d sphere sizes for dense region detection"), SphereSizes.Num());
 	
 	// Add instances in batches
-	int32 NumInstances = FMath::Min(Positions.Num(), Colors.Num());
 	const int32 BatchSize = 5000;
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Adding %d instances in batches of %d..."), NumInstances, BatchSize);
@@ -962,15 +998,13 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		TArray<FTransform> Transforms;
 		Transforms.Reserve(BatchEnd - BatchStart);
 		
-		// Offset to move PLY down (negative Z in Unreal = down)
-		const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
-		
 		for (int32 i = BatchStart; i < BatchEnd; i++)
 		{
+			FVector ScaledPos = Positions[i] * 125.0f + DownOffset;
 			FTransform Transform;
-			// Scale positions and apply downward offset (no jitter)
-			Transform.SetLocation(Positions[i] * 125.0f + DownOffset);
-			// Use adaptive sphere size, fallback to default if not calculated
+			// Always place at 3D - bounds must match geometry for visibility when camera is inside
+			// Plane morph: material WPO uses (1-MorphProgress) to pull points to flat plane at start
+			Transform.SetLocation(ScaledPos);
 			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			Transform.SetScale3D(FVector(SphereSize));
 			Transforms.Add(Transform);
@@ -986,7 +1020,6 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	
 	// Store current point positions (scaled and offset) for dense region detection BEFORE broadcasting
 	// Apply the same offset as used for rendering
-	const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
 	CurrentPointPositions.Empty();
 	CurrentPointPositions.Reserve(ScaledPositions.Num());
 	for (const FVector& ScaledPos : ScaledPositions)
@@ -1002,30 +1035,37 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		CurrentPointPositions.Num(), SphereSizes.Num());
 	
 	// Force update bounds after all instances are added (critical for preventing culling)
-	// Calculate explicit bounds from all positions (use CurrentPointPositions which already has offset applied)
-	if (CurrentPointPositions.Num() > 0)
-	{
+		if (CurrentPointPositions.Num() > 0)
+		{
 		FBox BoundingBox(ForceInit);
 		for (const FVector& Pos : CurrentPointPositions)
 		{
 			BoundingBox += Pos;
 		}
+		// Include flat plane positions too - WPO moves vertices there during morph, so bounds must encompass both flat and 3D
+		if (bMorphMaterialLoaded)
+		{
+			for (const FVector& Pos : ScaledPositions)
+			{
+				BoundingBox += FVector(Pos.X, FlatPlaneY, Pos.Z);
+			}
+		}
 		
-		// Expand bounds to account for sphere sizes
-		float MaxSphereSize = 0.1f; // Max cube size from adaptive sizing
-		BoundingBox = BoundingBox.ExpandBy(MaxSphereSize * 50.0f); // Expand by max sphere radius
+		// Expand bounds aggressively - must encompass both flat plane and full 3D extent for WPO morph.
+		// Large expansion prevents clipping when camera/actor is close or inside the cloud.
+		FVector Extent = BoundingBox.GetSize();
+		BoundingBox = BoundingBox.ExpandBy(FMath::Max(200.0f, FMath::Max3(Extent.X, Extent.Y, Extent.Z) * 0.5f));
 		
-		// Force HISM to use these bounds
+		// BoundsScale multiplies computed bounds - critical for WPO and when camera is inside/close.
+		// Very large value prevents frustum culling when actor is moved closer to camera.
+		PointCloudComponent->SetBoundsScale(10000.0f);
+		
 		PointCloudComponent->UpdateBounds();
 		PointCloudComponent->MarkRenderStateDirty();
 		
 		// Store bounds for external access
 		CurrentSplatBounds = BoundingBox;
 		bHasSplatBounds = true;
-		
-		// Store center for scaling operations
-		SplatCenter = BoundingBox.GetCenter();
-		bHasSplatCenter = true;
 		SplatScaleMultiplier = 1.0f; // Reset scale when creating new point cloud
 		
 		FVector BoxSize = BoundingBox.GetSize();
@@ -1047,202 +1087,115 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	// Final visibility and culling overrides
 	PointCloudComponent->SetVisibility(true);
 	PointCloudComponent->SetHiddenInGame(false);
-	PointCloudComponent->SetCullDistances(0, 0); // Ensure no distance culling
+	PointCloudComponent->SetCullDistances(0, 0);
 	PointCloudComponent->MarkRenderStateDirty();
 	
-	// Set colors
+	// Set colors and (when plane morph) Z offset in custom data
 	for (int32 i = 0; i < NumInstances && i < Colors.Num(); i++)
 	{
 		PointCloudComponent->SetCustomDataValue(i, 0, Colors[i].R / 255.0f);
 		PointCloudComponent->SetCustomDataValue(i, 1, Colors[i].G / 255.0f);
 		PointCloudComponent->SetCustomDataValue(i, 2, Colors[i].B / 255.0f);
 		PointCloudComponent->SetCustomDataValue(i, 3, Colors[i].A / 255.0f);
+		if (bMorphMaterialLoaded && i < ScaledPositions.Num())
+		{
+			// World-space Y delta: FlatPlaneY - TargetY (negated local offset for 180° yaw; WPO is world space)
+			float YOffsetWorld = FlatPlaneY - ScaledPositions[i].Y;
+			PointCloudComponent->SetCustomDataValue(i, 4, YOffsetWorld);
+		}
 	}
 	
 	PointCloudComponent->MarkRenderStateDirty();
 	
-	// Store sphere sizes for morphing (already calculated above)
+	// Start plane morph (GPU-based: animates MorphProgress 0->1), optionally after delay
+	if (bMorphMaterialLoaded && SplatMorphMID && World)
+	{
+		if (MorphStartDelaySeconds <= 0.0f)
+		{
+			bIsPlaneMorphing = true;
+			PlaneMorphStartTime = World->GetTimeSeconds();
+			World->GetTimerManager().SetTimer(PlaneMorphTimer, this, &USplatCreatorSubsystem::UpdatePlaneMorph, 0.016f, true);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Started plane morph (%.2fs)"), PlaneMorphDuration);
+		}
+		else
+		{
+			World->GetTimerManager().SetTimer(MorphStartDelayTimer, this, &USplatCreatorSubsystem::StartDelayedMorph, MorphStartDelaySeconds, false);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Plane morph delayed by %.2fs"), MorphStartDelaySeconds);
+		}
+	}
 	
-	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created point cloud with %d spheres"), NumInstances);
+	if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Created point cloud with %d spheres"), NumInstances);
 }
 
 
 // ============================================================
-// MORPH BETWEEN SPLATS
+// DELAYED MORPH START
 // ============================================================
 
-void USplatCreatorSubsystem::UpdateMorph()
+void USplatCreatorSubsystem::StartDelayedMorph()
 {
-	if (!bIsMorphing || !PointCloudComponent) return;
+	UWorld* World = GetWorld();
+	if (!World) return;
+	if (SplatMorphMID && PointCloudComponent)
+	{
+		bIsPlaneMorphing = true;
+		PlaneMorphStartTime = World->GetTimeSeconds();
+		World->GetTimerManager().SetTimer(PlaneMorphTimer, this, &USplatCreatorSubsystem::UpdatePlaneMorph, 0.016f, true);
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Started delayed plane morph (%.2fs)"), PlaneMorphDuration);
+	}
+}
 
+// ============================================================
+// PLANE-TO-3D MATERIAL MORPH (GPU-based)
+// ============================================================
+
+void USplatCreatorSubsystem::UpdatePlaneMorph()
+{
+	if (!bIsPlaneMorphing || !SplatMorphMID) return;
+	
 	UWorld* World = GetWorld();
 	if (!World) return;
 	
-	float CurrentTime = World->GetTimeSeconds();
-	float ElapsedTime = CurrentTime - MorphStartTime;
-	MorphProgress = ElapsedTime / MorphDuration;
+	float ElapsedTime = World->GetTimeSeconds() - PlaneMorphStartTime;
+	float Progress = FMath::Clamp(ElapsedTime / PlaneMorphDuration, 0.0f, 1.0f);
 	
-	if (MorphProgress >= 1.0f)
+	// Ease-in-out for smoother feel
+	Progress = Progress < 0.5f
+		? 4.0f * Progress * Progress * Progress
+		: 1.0f - FMath::Pow(-2.0f * Progress + 2.0f, 3.0f) / 2.0f;
+	
+	// Pass Progress: 0 = flat at start, 1 = full 3D at end. Instances placed at 3D so bounds are correct.
+	SplatMorphMID->SetScalarParameterValue(TEXT("MorphProgress"), Progress);
+	
+	if (Progress >= 1.0f)
 	{
-		CompleteMorph();
-		return;
-	}
-	
-	// Smooth easing function (ease-in-out cubic for smoother animation)
-	float EasedProgress = MorphProgress < 0.5f
-		? 4.0f * MorphProgress * MorphProgress * MorphProgress
-		: 1.0f - FMath::Pow(-2.0f * MorphProgress + 2.0f, 3.0f) / 2.0f;
-	
-	// Update instances in batches
-	int32 MaxInstances = FMath::Max(OldPositions.Num(), NewPositions.Num());
-	int32 BatchSize = 5000; // Larger batch for better performance
-	int32 BatchEnd = FMath::Min(MorphUpdateIndex + BatchSize, MaxInstances);
-	
-	// Ensure component has enough instances
-	if (PointCloudComponent->GetInstanceCount() < MaxInstances)
-	{
-		TArray<FTransform> PlaceholderTransforms;
-		for (int32 i = PointCloudComponent->GetInstanceCount(); i < MaxInstances; i++)
-		{
-			FTransform Transform;
-			// Start at old position if available, otherwise new position
-			FVector StartPos = (i < OldPositions.Num()) ? OldPositions[i] : (i < NewPositions.Num() ? NewPositions[i] : FVector::ZeroVector);
-			Transform.SetLocation(StartPos);
-			// Use adaptive sphere size, fallback to default
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-			Transform.SetScale3D(FVector(SphereSize));
-			PlaceholderTransforms.Add(Transform);
-		}
-		if (PlaceholderTransforms.Num() > 0)
-		{
-			PointCloudComponent->AddInstances(PlaceholderTransforms, false, true);
-		}
-	}
-	
-	// Update batch - smooth interpolation between old and new positions
-	for (int32 i = MorphUpdateIndex; i < BatchEnd; i++)
-	{
-		FVector InterpPos = FVector::ZeroVector;
-		FColor InterpColor = FColor::White;
-		
-		if (i < OldPositions.Num() && i < NewPositions.Num())
-		{
-			// Smooth interpolation between old and new positions
-			InterpPos = FMath::Lerp(OldPositions[i], NewPositions[i], EasedProgress);
-			
-			// Smooth color interpolation
-			FLinearColor OldLinear = OldColors[i].ReinterpretAsLinear();
-			FLinearColor NewLinear = NewColors[i].ReinterpretAsLinear();
-			FLinearColor InterpLinear = FMath::Lerp(OldLinear, NewLinear, EasedProgress);
-			InterpColor = InterpLinear.ToFColor(true);
-		}
-		else if (i < NewPositions.Num())
-		{
-			// New point - fade in from old position or start position
-			FVector StartPos = (i < OldPositions.Num()) ? OldPositions[i] : NewPositions[i];
-			InterpPos = FMath::Lerp(StartPos, NewPositions[i], EasedProgress);
-			InterpColor = NewColors[i];
-			InterpColor.A = FMath::RoundToInt(EasedProgress * 255.0f); // Fade in
-		}
-		else if (i < OldPositions.Num())
-		{
-			// Old point fading out
-			InterpPos = OldPositions[i];
-			InterpColor = OldColors[i];
-			InterpColor.A = FMath::RoundToInt((1.0f - EasedProgress) * 255.0f); // Fade out
-		}
-		
-		if (i < PointCloudComponent->GetInstanceCount())
-		{
-			FTransform Transform;
-			Transform.SetLocation(InterpPos);
-			// Use adaptive sphere size, fallback to default
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-			Transform.SetScale3D(FVector(SphereSize));
-			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
-			
-			PointCloudComponent->SetCustomDataValue(i, 0, FMath::Clamp(InterpColor.R / 255.0f, 0.0f, 1.0f));
-			PointCloudComponent->SetCustomDataValue(i, 1, FMath::Clamp(InterpColor.G / 255.0f, 0.0f, 1.0f));
-			PointCloudComponent->SetCustomDataValue(i, 2, FMath::Clamp(InterpColor.B / 255.0f, 0.0f, 1.0f));
-			PointCloudComponent->SetCustomDataValue(i, 3, FMath::Clamp(InterpColor.A / 255.0f, 0.0f, 1.0f));
-		}
-	}
-	
-	PointCloudComponent->MarkRenderStateDirty();
-	
-	MorphUpdateIndex = BatchEnd;
-	if (MorphUpdateIndex >= MaxInstances)
-	{
-		MorphUpdateIndex = 0;
+		CompletePlaneMorph();
 	}
 }
 
-void USplatCreatorSubsystem::CompleteMorph()
+void USplatCreatorSubsystem::CompletePlaneMorph()
 {
 	UWorld* World = GetWorld();
-	if (MorphTimer.IsValid() && World)
+	if (PlaneMorphTimer.IsValid() && World)
 	{
-		World->GetTimerManager().ClearTimer(MorphTimer);
+		World->GetTimerManager().ClearTimer(PlaneMorphTimer);
 	}
 	
-	bIsMorphing = false;
-	MorphProgress = 0.0f;
-	MorphUpdateIndex = 0;
+	bIsPlaneMorphing = false;
 	
-	// Ensure final state
-	int32 NumInstances = NewPositions.Num();
-	if (PointCloudComponent && NumInstances > 0)
+	if (SplatMorphMID)
 	{
-		for (int32 i = 0; i < NumInstances && i < PointCloudComponent->GetInstanceCount(); i++)
-		{
-			FTransform Transform;
-			Transform.SetLocation(NewPositions[i]);
-			// Use adaptive sphere size, fallback to default
-			float SphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-			Transform.SetScale3D(FVector(SphereSize));
-			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
-			
-			if (i < NewColors.Num())
-			{
-				PointCloudComponent->SetCustomDataValue(i, 0, NewColors[i].R / 255.0f);
-				PointCloudComponent->SetCustomDataValue(i, 1, NewColors[i].G / 255.0f);
-				PointCloudComponent->SetCustomDataValue(i, 2, NewColors[i].B / 255.0f);
-				PointCloudComponent->SetCustomDataValue(i, 3, NewColors[i].A / 255.0f);
-			}
-		}
-		
+		SplatMorphMID->SetScalarParameterValue(TEXT("MorphProgress"), 1.0f);  // 1 = full 3D, no flattening
+	}
+	
+	// Force bounds refresh - WPO morph can leave stale culling bounds; ensure full 3D extent is visible
+	if (PointCloudComponent)
+	{
+		PointCloudComponent->UpdateBounds();
 		PointCloudComponent->MarkRenderStateDirty();
-		
-		// Update bounds and store positions after morph completes
-		if (NewPositions.Num() > 0)
-		{
-			FBox BoundingBox(ForceInit);
-			for (const FVector& Pos : NewPositions)
-			{
-				BoundingBox += Pos;
-			}
-			CurrentSplatBounds = BoundingBox;
-			bHasSplatBounds = true;
-			
-			// Store current positions for dense region detection
-			CurrentPointPositions = NewPositions;
-			
-			// Store base positions for bobbing animation
-			BasePointPositions = NewPositions;
-			
-			// Update center for scaling
-			SplatCenter = BoundingBox.GetCenter();
-			bHasSplatCenter = true;
-			SplatScaleMultiplier = 1.0f; // Reset scale when morph completes
-			
-			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated bounds after morph: Min=(%.1f, %.1f, %.1f), Max=(%.1f, %.1f, %.1f)"), 
-				BoundingBox.Min.X, BoundingBox.Min.Y, BoundingBox.Min.Z,
-				BoundingBox.Max.X, BoundingBox.Max.Y, BoundingBox.Max.Z);
-			
-			// Notify other subsystems that bounds have been updated
-			OnSplatBoundsUpdated.Broadcast(BoundingBox);
-		}
 	}
+	
+	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Plane morph complete"));
 }
 
 // ============================================================
@@ -1251,9 +1204,9 @@ void USplatCreatorSubsystem::CompleteMorph()
 
 void USplatCreatorSubsystem::ScaleSplat(float NewScaleMultiplier)
 {
-	if (!PointCloudComponent || BasePointPositions.Num() == 0 || !bHasSplatCenter)
+	if (!PointCloudComponent || BasePointPositions.Num() == 0 || !bHasSplatBounds)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot scale splat - no point cloud loaded or center not calculated"));
+		if (debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot scale splat - no point cloud loaded or center not calculated"));
 		return;
 	}
 	
@@ -1263,7 +1216,7 @@ void USplatCreatorSubsystem::ScaleSplat(float NewScaleMultiplier)
 
 void USplatCreatorSubsystem::UpdateSplatScale()
 {
-	if (!PointCloudComponent || BasePointPositions.Num() == 0 || !bHasSplatCenter)
+	if (!PointCloudComponent || BasePointPositions.Num() == 0 || !bHasSplatBounds)
 	{
 		return;
 	}
@@ -1277,16 +1230,13 @@ void USplatCreatorSubsystem::UpdateSplatScale()
 		// Update all instances with scaled positions and sizes
 		for (int32 i = 0; i < NumInstances; i++)
 		{
-			// Scale position relative to center
+			if (i >= PointCloudComponent->GetInstanceCount()) continue;
 			FVector BasePosition = BasePointPositions[i];
-			FVector OffsetFromCenter = BasePosition - SplatCenter;
+			FVector OffsetFromCenter = BasePosition - CurrentSplatBounds.GetCenter();
 			FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-			FVector NewPosition = SplatCenter + ScaledOffset;
-			
-			// Scale sphere size proportionally
+			FVector NewPosition = CurrentSplatBounds.GetCenter() + ScaledOffset;
 			float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			float ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
-			
 			FTransform Transform;
 			if (PointCloudComponent->GetInstanceTransform(i, Transform))
 			{
@@ -1301,9 +1251,9 @@ void USplatCreatorSubsystem::UpdateSplatScale()
 		CurrentPointPositions.Reserve(BasePointPositions.Num());
 		for (const FVector& BasePos : BasePointPositions)
 		{
-			FVector OffsetFromCenter = BasePos - SplatCenter;
+			FVector OffsetFromCenter = BasePos - CurrentSplatBounds.GetCenter();
 			FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-			CurrentPointPositions.Add(SplatCenter + ScaledOffset);
+			CurrentPointPositions.Add(CurrentSplatBounds.GetCenter() + ScaledOffset);
 		}
 		
 		PointCloudComponent->MarkRenderStateDirty();
@@ -1311,7 +1261,7 @@ void USplatCreatorSubsystem::UpdateSplatScale()
 	// If bobbing is active, the next UpdateBobbing call will apply the new scale
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat scaled to %.2fx (center: %s)"), 
-		SplatScaleMultiplier, *SplatCenter.ToString());
+		SplatScaleMultiplier, *CurrentSplatBounds.GetCenter().ToString());
 }
 
 void USplatCreatorSubsystem::ResetToNormal()
@@ -1362,16 +1312,13 @@ void USplatCreatorSubsystem::ResetToNormal()
 		
 		for (int32 i = 0; i < NumInstances; i++)
 		{
+			if (i >= PointCloudComponent->GetInstanceCount()) continue;
 			FTransform Transform;
 			if (PointCloudComponent->GetInstanceTransform(i, Transform))
 			{
-				// Restore to base position (unscaled, unbobbed)
 				Transform.SetLocation(BasePointPositions[i]);
-				
-				// Restore to base sphere size
 				float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 				Transform.SetScale3D(FVector(BaseSphereSize));
-				
 				PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
 			}
 		}
@@ -1384,47 +1331,6 @@ void USplatCreatorSubsystem::ResetToNormal()
 	
 	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Reset to normal - all transformations cleared (scale: %.2f, speed: %.2f)"), 
 		SplatScaleMultiplier, BobbingSpeedMultiplier);
-}
-
-// ============================================================
-// GET DIMENSIONS FOR HYPER3DOBJECTS
-// ============================================================
-
-FVector2D USplatCreatorSubsystem::GetSplatDimensions() const
-{
-	if (!bHasSplatBounds)
-	{
-		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning default (200x200)"));
-		return FVector2D(200.0f, 200.0f);
-	}
-	
-	// Return world-space dimensions (transform local bounds by actor transform)
-	FBox WorldBounds = GetSplatBounds();
-	FVector BoxSize = WorldBounds.GetSize();
-	FVector2D Dimensions(BoxSize.X, BoxSize.Y);
-	
-	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat dimensions: X=%.1f, Y=%.1f"), Dimensions.X, Dimensions.Y);
-	return Dimensions;
-}
-
-FVector USplatCreatorSubsystem::GetSplatCenter() const
-{
-	if (!bHasSplatBounds)
-	{
-		if(debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] No splat bounds available, returning origin"));
-		return FVector::ZeroVector;
-	}
-	
-	// Transform local center to world space (includes actor rotation)
-	FVector LocalCenter = CurrentSplatBounds.GetCenter();
-	if (CurrentPointCloudActor)
-	{
-		FVector WorldCenter = CurrentPointCloudActor->GetActorTransform().TransformPosition(LocalCenter);
-		if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s (world)"), *WorldCenter.ToString());
-		return WorldCenter;
-	}
-	if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Splat center: %s (local, no actor)"), *LocalCenter.ToString());
-	return LocalCenter;
 }
 
 FBox USplatCreatorSubsystem::GetSplatBounds() const
@@ -1518,7 +1424,7 @@ void USplatCreatorSubsystem::HandleOSCMessage(const FString& Message)
 {
 	if (!PointCloudComponent || CurrentPointPositions.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot handle OSC message - no point cloud loaded"));
+		if (debug) UE_LOG(LogTemp, Warning, TEXT("[SplatCreator] Cannot handle OSC message - no point cloud loaded"));
 		return;
 	}
 	
@@ -1695,12 +1601,12 @@ void USplatCreatorSubsystem::UpdateBobbing()
 		FVector FinalPosition;
 		float ScaledSphereSize;
 		
-		if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+		if (bHasSplatBounds && SplatScaleMultiplier != 1.0f)
 		{
 			// Scale the bobbed position relative to center
-			FVector OffsetFromCenter = BobbedBasePosition - SplatCenter;
+			FVector OffsetFromCenter = BobbedBasePosition - CurrentSplatBounds.GetCenter();
 			FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-			FinalPosition = SplatCenter + ScaledOffset;
+			FinalPosition = CurrentSplatBounds.GetCenter() + ScaledOffset;
 			
 			// Scale sphere size
 			float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
@@ -1713,17 +1619,16 @@ void USplatCreatorSubsystem::UpdateBobbing()
 			ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 		}
 		
+		if (i >= PointCloudComponent->GetInstanceCount()) continue;
 		FTransform Transform;
 		if (PointCloudComponent->GetInstanceTransform(i, Transform))
 		{
 			Transform.SetLocation(FinalPosition);
 			Transform.SetScale3D(FVector(ScaledSphereSize));
-			// Pass false for bMarkRenderStateDirty - we'll do it once at the end
 			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
 		}
 	}
 	
-	// Mark render state dirty once at the end (much more efficient than per-instance)
 	PointCloudComponent->MarkRenderStateDirty();
 }
 
@@ -1746,16 +1651,13 @@ void USplatCreatorSubsystem::StopBobbing(bool bSmoothInterpolation)
 	
 	if (bSmoothInterpolation && PointCloudComponent && BasePointPositions.Num() > 0)
 	{
-		// Start smooth interpolation back to base positions
 		int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
 		InterpolationStartPositions.Empty();
 		InterpolationStartPositions.Reserve(NumInstances);
-		
-		// Store current positions as starting points for interpolation
 		for (int32 i = 0; i < NumInstances; i++)
 		{
 			FTransform Transform;
-			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			if (i < PointCloudComponent->GetInstanceCount() && PointCloudComponent->GetInstanceTransform(i, Transform))
 			{
 				InterpolationStartPositions.Add(Transform.GetLocation());
 			}
@@ -1764,15 +1666,12 @@ void USplatCreatorSubsystem::StopBobbing(bool bSmoothInterpolation)
 				InterpolationStartPositions.Add(BasePointPositions[i]);
 			}
 		}
-		
 		bIsInterpolatingToBase = true;
 		InterpolationTime = 0.0f;
-		
-		// Start interpolation timer
 		if (World)
 		{
 			World->GetTimerManager().SetTimer(
-				BobbingTimer, // Reuse bobbing timer for interpolation
+				BobbingTimer,
 				this,
 				&USplatCreatorSubsystem::UpdateInterpolationToBase,
 				0.016f, // ~60fps
@@ -1780,49 +1679,39 @@ void USplatCreatorSubsystem::StopBobbing(bool bSmoothInterpolation)
 			);
 		}
 	}
-	else
-	{
-		// Immediate restore (no interpolation)
-		BobbingSpeedMultiplier = 1.0f; // Reset speed to normal when stopping
-		
-		if (PointCloudComponent && BasePointPositions.Num() > 0)
+		else
 		{
-			int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
-			
-			for (int32 i = 0; i < NumInstances; i++)
+			BobbingSpeedMultiplier = 1.0f;
+			if (PointCloudComponent && BasePointPositions.Num() > 0)
 			{
-				FVector FinalPosition;
-				float ScaledSphereSize;
-				
-				// Apply scaling if scale is not 1.0
-				if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+				int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
+				for (int32 i = 0; i < NumInstances; i++)
 				{
-					FVector OffsetFromCenter = BasePointPositions[i] - SplatCenter;
-					FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-					FinalPosition = SplatCenter + ScaledOffset;
-					
-					float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-					ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+					if (i >= PointCloudComponent->GetInstanceCount()) continue;
+					FVector FinalPosition;
+					float ScaledSphereSize;
+					if (bHasSplatBounds && SplatScaleMultiplier != 1.0f)
+					{
+						FVector OffsetFromCenter = BasePointPositions[i] - CurrentSplatBounds.GetCenter();
+						FinalPosition = CurrentSplatBounds.GetCenter() + OffsetFromCenter * SplatScaleMultiplier;
+						ScaledSphereSize = (i < SphereSizes.Num() ? SphereSizes[i] : 0.06f) * SplatScaleMultiplier;
+					}
+					else
+					{
+						FinalPosition = BasePointPositions[i];
+						ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
+					}
+					FTransform Transform;
+					if (PointCloudComponent->GetInstanceTransform(i, Transform))
+					{
+						Transform.SetLocation(FinalPosition);
+						Transform.SetScale3D(FVector(ScaledSphereSize));
+						PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
+					}
 				}
-				else
-				{
-					FinalPosition = BasePointPositions[i];
-					ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-				}
-				
-				FTransform Transform;
-				if (PointCloudComponent->GetInstanceTransform(i, Transform))
-				{
-					Transform.SetLocation(FinalPosition);
-					Transform.SetScale3D(FVector(ScaledSphereSize));
-					PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
-				}
+				PointCloudComponent->MarkRenderStateDirty();
 			}
-			
-			PointCloudComponent->MarkRenderStateDirty();
 		}
-		
-	}
 }
 
 // ============================================================
@@ -1996,12 +1885,12 @@ void USplatCreatorSubsystem::UpdateRandomMovement()
 		FVector FinalPosition;
 		float ScaledSphereSize;
 		
-		if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+		if (bHasSplatBounds && SplatScaleMultiplier != 1.0f)
 		{
 			// Scale the random position relative to center
-			FVector OffsetFromCenter = NewPosition - SplatCenter;
+			FVector OffsetFromCenter = NewPosition - CurrentSplatBounds.GetCenter();
 			FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-			FinalPosition = SplatCenter + ScaledOffset;
+			FinalPosition = CurrentSplatBounds.GetCenter() + ScaledOffset;
 			
 			float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
@@ -2012,17 +1901,16 @@ void USplatCreatorSubsystem::UpdateRandomMovement()
 			ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 		}
 		
+		if (i >= PointCloudComponent->GetInstanceCount()) continue;
 		FTransform Transform;
 		if (PointCloudComponent->GetInstanceTransform(i, Transform))
 		{
 			Transform.SetLocation(FinalPosition);
 			Transform.SetScale3D(FVector(ScaledSphereSize));
-			// Pass false for bMarkRenderStateDirty - we'll do it once at the end
 			PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
 		}
 	}
 	
-	// Mark render state dirty once at the end (much more efficient than per-instance)
 	PointCloudComponent->MarkRenderStateDirty();
 }
 
@@ -2044,16 +1932,13 @@ void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
 	
 	if (bSmoothInterpolation && PointCloudComponent && BasePointPositions.Num() > 0)
 	{
-		// Start smooth interpolation back to base positions
 		int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
 		InterpolationStartPositions.Empty();
 		InterpolationStartPositions.Reserve(NumInstances);
-		
-		// Store current positions as starting points for interpolation
 		for (int32 i = 0; i < NumInstances; i++)
 		{
 			FTransform Transform;
-			if (PointCloudComponent->GetInstanceTransform(i, Transform))
+			if (i < PointCloudComponent->GetInstanceCount() && PointCloudComponent->GetInstanceTransform(i, Transform))
 			{
 				InterpolationStartPositions.Add(Transform.GetLocation());
 			}
@@ -2062,15 +1947,12 @@ void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
 				InterpolationStartPositions.Add(BasePointPositions[i]);
 			}
 		}
-		
 		bIsInterpolatingToBase = true;
 		InterpolationTime = 0.0f;
-		
-		// Start interpolation timer
 		if (World)
 		{
 			World->GetTimerManager().SetTimer(
-				RandomMovementTimer, // Reuse random movement timer for interpolation
+				RandomMovementTimer,
 				this,
 				&USplatCreatorSubsystem::UpdateInterpolationToBase,
 				0.016f, // ~60fps
@@ -2081,34 +1963,26 @@ void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
 	}
 	else
 	{
-		// Immediate restore (no interpolation)
-		RandomMovementSpeedMultiplier = 1.0f; // Reset speed to normal when stopping
-		
+		RandomMovementSpeedMultiplier = 1.0f;
 		if (PointCloudComponent && BasePointPositions.Num() > 0)
 		{
 			int32 NumInstances = FMath::Min(PointCloudComponent->GetInstanceCount(), BasePointPositions.Num());
-			
 			for (int32 i = 0; i < NumInstances; i++)
 			{
+				if (i >= PointCloudComponent->GetInstanceCount()) continue;
 				FVector FinalPosition;
 				float ScaledSphereSize;
-				
-				// Apply scaling if scale is not 1.0
-				if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+				if (bHasSplatBounds && SplatScaleMultiplier != 1.0f)
 				{
-					FVector OffsetFromCenter = BasePointPositions[i] - SplatCenter;
-					FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-					FinalPosition = SplatCenter + ScaledOffset;
-					
-					float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-					ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+					FVector OffsetFromCenter = BasePointPositions[i] - CurrentSplatBounds.GetCenter();
+					FinalPosition = CurrentSplatBounds.GetCenter() + OffsetFromCenter * SplatScaleMultiplier;
+					ScaledSphereSize = (i < SphereSizes.Num() ? SphereSizes[i] : 0.06f) * SplatScaleMultiplier;
 				}
 				else
 				{
 					FinalPosition = BasePointPositions[i];
 					ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 				}
-				
 				FTransform Transform;
 				if (PointCloudComponent->GetInstanceTransform(i, Transform))
 				{
@@ -2117,10 +1991,8 @@ void USplatCreatorSubsystem::StopRandomMovement(bool bSmoothInterpolation)
 					PointCloudComponent->UpdateInstanceTransform(i, Transform, false, false);
 				}
 			}
-			
 			PointCloudComponent->MarkRenderStateDirty();
 		}
-		
 	}
 	
 	RandomVelocities.Empty();
@@ -2160,34 +2032,21 @@ void USplatCreatorSubsystem::UpdateInterpolationToBase()
 		
 		for (int32 i = BatchStart; i < BatchEnd; i++)
 		{
-			if (i >= InterpolationStartPositions.Num())
-			{
-				continue;
-			}
-			
-			// Calculate target position (base position with scaling applied)
+			if (i >= InterpolationStartPositions.Num() || i >= PointCloudComponent->GetInstanceCount()) continue;
 			FVector TargetPosition;
 			float ScaledSphereSize;
-			
-			if (bHasSplatCenter && SplatScaleMultiplier != 1.0f)
+			if (bHasSplatBounds && SplatScaleMultiplier != 1.0f)
 			{
-				FVector OffsetFromCenter = BasePointPositions[i] - SplatCenter;
-				FVector ScaledOffset = OffsetFromCenter * SplatScaleMultiplier;
-				TargetPosition = SplatCenter + ScaledOffset;
-				
-				float BaseSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
-				ScaledSphereSize = BaseSphereSize * SplatScaleMultiplier;
+				FVector OffsetFromCenter = BasePointPositions[i] - CurrentSplatBounds.GetCenter();
+				TargetPosition = CurrentSplatBounds.GetCenter() + OffsetFromCenter * SplatScaleMultiplier;
+				ScaledSphereSize = (i < SphereSizes.Num() ? SphereSizes[i] : 0.06f) * SplatScaleMultiplier;
 			}
 			else
 			{
 				TargetPosition = BasePointPositions[i];
 				ScaledSphereSize = (i < SphereSizes.Num()) ? SphereSizes[i] : 0.06f;
 			}
-			
-			// Interpolate from start position to target position
-			FVector StartPosition = InterpolationStartPositions[i];
-			FVector InterpolatedPosition = FMath::Lerp(StartPosition, TargetPosition, EasedAlpha);
-			
+			FVector InterpolatedPosition = FMath::Lerp(InterpolationStartPositions[i], TargetPosition, EasedAlpha);
 			FTransform Transform;
 			if (PointCloudComponent->GetInstanceTransform(i, Transform))
 			{

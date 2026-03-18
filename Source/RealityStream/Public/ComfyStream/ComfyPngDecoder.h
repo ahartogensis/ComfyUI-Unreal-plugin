@@ -6,9 +6,7 @@
 #include "ComfyPngDecoder.generated.h"
 
 
-//Decodes PNG and JPEG images into UTexture2D
-//Assume depth images are DepthAnything PNGs
-//Use UE's built-in image wrapper module for decoding
+// Decodes PNG images into UTexture2D (used by ComfyStreamActor for received images)
 UCLASS()
 class REALITYSTREAM_API UComfyPngDecoder : public UObject
 {
@@ -19,7 +17,6 @@ public:
 	UTexture2D* DecodePNGToTextureWithFormat(const TArray<uint8>& PNGData, TEnumAsByte<EPixelFormat> PixelFormat);
 
 	bool IsValidPNGData(const TArray<uint8>& PNGData);
-	bool IsValidJPEGData(const TArray<uint8>& ImageData);
 
 private:
 	UTexture2D* CreateTextureFromData(const TArray<uint8>& UncompressedData, int32 Width, int32 Height, EPixelFormat PixelFormat);

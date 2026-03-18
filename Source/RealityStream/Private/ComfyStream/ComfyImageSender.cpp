@@ -113,7 +113,7 @@ void UComfyImageSender::SendPendingImage()
 		return;
 	}
 
-	// ComfyUI WebViewer expects 8-byte header [1, 2] (big-endian) before raw PNG/JPEG data
+	// ComfyUI WebViewer expects 8-byte header [1, 2] (big-endian) before raw PNG data
 	TArray<uint8> MessageWithHeader;
 	MessageWithHeader.SetNum(8 + PendingImageData.Num());
 	MessageWithHeader[0] = 0; MessageWithHeader[1] = 0; MessageWithHeader[2] = 0; MessageWithHeader[3] = 1;  // uint32 1
