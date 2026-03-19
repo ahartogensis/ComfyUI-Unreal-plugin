@@ -133,12 +133,63 @@ void USplatCreatorSubsystem::Deinitialize()
 // FIND PLYs
 // ============================================================
 
-void USplatCreatorSubsystem::SetImagePreviewTarget(UPrimitiveComponent* PlaneComponent, UMaterialInterface* Material)
+void USplatCreatorSubsystem::SetImagePreviewTarget(FName TargetName, UPrimitiveComponent* PlaneComponent, UMaterialInterface* Material)
 {
-	ImagePreviewPlaneComponent = PlaneComponent;
-	ImagePreviewMaterial = Material; // nullptr = will load from ImagePreviewMaterialPath when needed
-	ImagePreviewMID = nullptr; // Will be created when we first display an image
-	if (debug && PlaneComponent) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Image preview target set - plane will display ComfyUI-bound image"));
+	if (TargetName.IsNone())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] SetImagePreviewTarget failed: TargetName is None"));
+		return;
+	}
+
+	if (!IsValid(PlaneComponent))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] SetImagePreviewTarget failed: PlaneComponent invalid for target %s"), *TargetName.ToString());
+		return;
+	}
+
+	if (!IsValid(Material))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[SplatCreator] SetImagePreviewTarget failed: Material invalid for target %s"), *TargetName.ToString());
+		return;
+	}
+
+	for (FImagePreviewTarget& Target : ImagePreviewTargets)
+	{
+		if (Target.TargetName == TargetName)
+		{
+			Target.PlaneComponent = PlaneComponent;
+			Target.Material = Material;
+			Target.MID = nullptr;
+
+			UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated preview target %s with material %s"),
+				*TargetName.ToString(), *Material->GetName());
+			return;
+		}
+	}
+
+	FImagePreviewTarget NewTarget;
+	NewTarget.TargetName = TargetName;
+	NewTarget.PlaneComponent = PlaneComponent;
+	NewTarget.Material = Material;
+	NewTarget.MID = nullptr;
+
+	ImagePreviewTargets.Add(NewTarget);
+
+	UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Added preview target %s with material %s"),
+		*TargetName.ToString(), *Material->GetName());
+}
+
+void USplatCreatorSubsystem::RemoveImagePreviewTarget(FName TargetName)
+{
+	const int32 NumRemoved = ImagePreviewTargets.RemoveAll([&](const FImagePreviewTarget& Target)
+	{
+		return Target.TargetName == TargetName;
+	});
+
+	if (NumRemoved > 0)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Removed preview target %s"), *TargetName.ToString());
+	}
 }
 
 void USplatCreatorSubsystem::SetSendCurrentSplatImageToComfyUI(bool bSendCurrent)
@@ -196,26 +247,10 @@ void USplatCreatorSubsystem::TrySendImageToComfyUI(const FString& PLYPath)
 
 void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 {
-	UPrimitiveComponent* Plane = ImagePreviewPlaneComponent.Get();
-	if (!Plane || !IsValid(Plane))
-	{
-		return;
-	}
-
-	UMaterialInterface* Mat = ImagePreviewMaterial.Get();
-	if (!Mat && ImagePreviewMaterialPath.IsValid())
-	{
-		Mat = Cast<UMaterialInterface>(ImagePreviewMaterialPath.TryLoad());
-		if (Mat) ImagePreviewMaterial = Mat;
-	}
-	if (!Mat || !IsValid(Mat))
-	{
-		return;
-	}
-
 	FString BaseName = FPaths::GetBaseFilename(PLYPath);
 	FString Dir = FPaths::GetPath(PLYPath);
 	FString ImagePath = Dir / (BaseName + TEXT(".png"));
+
 	if (!FPaths::FileExists(ImagePath))
 	{
 		return;
@@ -231,107 +266,147 @@ void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 	{
 		ImageDecoder = NewObject<UComfyPngDecoder>(this);
 	}
+
 	if (!ImageDecoder)
 	{
 		return;
 	}
 
 	UTexture2D* DecodedTexture = ImageDecoder->DecodePNGToTexture(ImageData);
-	if (!DecodedTexture || !IsValid(DecodedTexture))
+	if (!IsValid(DecodedTexture))
 	{
 		return;
 	}
 
 	UTexture* FinalTexture = DecodedTexture;
+
 	if (bAddTextToImagePreview)
 	{
-		UWorld* World = GetWorld();
-		if (World)
+		if (UWorld* World = GetWorld())
 		{
-			int32 TexW = DecodedTexture->GetSurfaceWidth();
-			int32 TexH = DecodedTexture->GetSurfaceHeight();
+			const int32 TexW = DecodedTexture->GetSurfaceWidth();
+			const int32 TexH = DecodedTexture->GetSurfaceHeight();
+
 			if (TexW > 0 && TexH > 0)
 			{
 				if (!CanvasRenderTargetForText || CanvasRenderTargetForText->SizeX != TexW || CanvasRenderTargetForText->SizeY != TexH)
 				{
-					CanvasRenderTargetForText = UCanvasRenderTarget2D::CreateCanvasRenderTarget2D(World, UCanvasRenderTarget2D::StaticClass(), TexW, TexH);
+					CanvasRenderTargetForText = UCanvasRenderTarget2D::CreateCanvasRenderTarget2D(
+						World,
+						UCanvasRenderTarget2D::StaticClass(),
+						TexW,
+						TexH
+					);
+
 					if (CanvasRenderTargetForText)
 					{
-						CanvasRenderTargetForText->ClearColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);  // Opaque white clear - avoids translucent result when material multiplies by texture alpha
+						CanvasRenderTargetForText->ClearColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
+						CanvasRenderTargetForText->OnCanvasRenderTargetUpdate.Clear();
 						CanvasRenderTargetForText->OnCanvasRenderTargetUpdate.AddDynamic(this, &USplatCreatorSubsystem::OnCanvasRenderTargetUpdate);
 					}
 				}
+
 				if (CanvasRenderTargetForText)
 				{
 					FString DisplayText = ImagePreviewTextFormat;
 					DisplayText.ReplaceInline(TEXT("{0}"), *BaseName);
 					DisplayText.ReplaceInline(TEXT("{1}"), *FString::FromInt(CurrentFileIndex + 1));
 					DisplayText.ReplaceInline(TEXT("{2}"), *FString::FromInt(PlyFiles.Num()));
+
 					TextOverlaySourceTexture = DecodedTexture;
 					TextOverlayDisplayText = DisplayText;
+
 					CanvasRenderTargetForText->UpdateResource();
 					FinalTexture = CanvasRenderTargetForText;
+
 					TextOverlaySourceTexture = nullptr;
 				}
 			}
 		}
 	}
 
-	if (!ImagePreviewMID)
+	for (FImagePreviewTarget& Target : ImagePreviewTargets)
 	{
-		ImagePreviewMID = UMaterialInstanceDynamic::Create(Mat, this);
-	}
-	if (ImagePreviewMID)
-	{
-		ImagePreviewMID->SetTextureParameterValue(TEXT("Image"), FinalTexture);
-		ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
-		Plane->SetMaterial(0, ImagePreviewMID);
+		UPrimitiveComponent* Plane = Target.PlaneComponent.Get();
+		UMaterialInterface* Mat = Target.Material.Get();
 
-		if (bFadeImagePreviewOpacity)
+		if (!IsValid(Plane) || !IsValid(Mat))
 		{
-			UWorld* World = GetWorld();
-			if (World)
-			{
-				World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
-				ImagePreviewOpacityFadeStartTime = World->GetTimeSeconds();
-				World->GetTimerManager().SetTimer(ImagePreviewOpacityFadeTimer, this, &USplatCreatorSubsystem::UpdateImagePreviewOpacityFade, 1.0f / 30.0f, true);
-			}
+			continue;
 		}
 
-		if (debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Updated preview plane with current image: %s"), *BaseName);
+		if (!IsValid(Target.MID))
+		{
+			Target.MID = UMaterialInstanceDynamic::Create(Mat, this);
+		}
+
+		if (!IsValid(Target.MID))
+		{
+			continue;
+		}
+
+		Target.MID->SetTextureParameterValue(TEXT("Image"), FinalTexture);
+		Target.MID->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
+		Plane->SetMaterial(0, Target.MID);
+	}
+
+	if (bFadeImagePreviewOpacity)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
+			ImagePreviewOpacityFadeStartTime = World->GetTimeSeconds();
+			World->GetTimerManager().SetTimer(
+				ImagePreviewOpacityFadeTimer,
+				this,
+				&USplatCreatorSubsystem::UpdateImagePreviewOpacityFade,
+				1.0f / 30.0f,
+				true
+			);
+		}
 	}
 }
 
+
 void USplatCreatorSubsystem::UpdateImagePreviewOpacityFade()
 {
-	UWorld* World = GetWorld();
-	if (!World || !ImagePreviewMID) return;
-
-	float Elapsed = World->GetTimeSeconds() - ImagePreviewOpacityFadeStartTime;
-	float OpacityValue = 1.0f;
-	// Hold at full opacity for ImagePreviewOpacityHoldDuration, then fade over ImagePreviewOpacityFadeDuration
-	if (Elapsed < ImagePreviewOpacityHoldDuration)
+	if (!bFadeImagePreviewOpacity)
 	{
-		OpacityValue = 1.0f;
-		ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), OpacityValue);
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const float Elapsed = World->GetTimeSeconds() - ImagePreviewOpacityFadeStartTime;
+
+	float Opacity = 1.0f;
+
+	if (Elapsed <= ImagePreviewOpacityHoldDuration)
+	{
+		Opacity = 1.0f;
 	}
 	else
 	{
-		float FadeElapsed = Elapsed - ImagePreviewOpacityHoldDuration;
-		if (FadeElapsed >= ImagePreviewOpacityFadeDuration)
-		{
-			OpacityValue = 0.0f;
-			ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), OpacityValue);
-			World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
-			return;
-		}
-		OpacityValue = 1.0f - (FadeElapsed / ImagePreviewOpacityFadeDuration);
-		ImagePreviewMID->SetScalarParameterValue(TEXT("Opacity"), OpacityValue);
+		const float FadeElapsed = Elapsed - ImagePreviewOpacityHoldDuration;
+		const float Alpha = FMath::Clamp(FadeElapsed / ImagePreviewOpacityFadeDuration, 0.0f, 1.0f);
+		Opacity = 1.0f - Alpha;
 	}
-	// Force render update so opacity changes apply immediately
-	if (UPrimitiveComponent* Plane = ImagePreviewPlaneComponent.Get())
+
+	for (FImagePreviewTarget& Target : ImagePreviewTargets)
 	{
-		Plane->MarkRenderStateDirty();
+		if (IsValid(Target.MID))
+		{
+			Target.MID->SetScalarParameterValue(TEXT("Opacity"), Opacity);
+		}
+	}
+
+	if (Opacity <= 0.0f)
+	{
+		World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
 	}
 }
 

@@ -25,6 +25,26 @@ enum class EBobbingDirection : uint8
 	Right
 };
 
+
+//Preview Image
+USTRUCT(BlueprintType)
+struct FImagePreviewTarget
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TObjectPtr<UPrimitiveComponent> PlaneComponent = nullptr;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> Material = nullptr;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> MID = nullptr;
+
+	UPROPERTY()
+	FName TargetName = NAME_None;
+};
+
 UCLASS(BlueprintType)
 class REALITYSTREAM_API USplatCreatorSubsystem : public UGameInstanceSubsystem
 {
@@ -65,11 +85,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	void CycleToNextSplat();
 
-	// Set the plane to display the image that gets sent to ComfyUI.
-	// Uses M_image material by default (Image parameter). Pass Material to override.
+	// Register or update an image preview target for a specific blueprint/plane.
+	// Each target name stores its own plane, material, and MID.
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI")
-	void SetImagePreviewTarget(UPrimitiveComponent* PlaneComponent, UMaterialInterface* Material = nullptr);
+	void SetImagePreviewTarget(FName TargetName, UPrimitiveComponent* PlaneComponent, UMaterialInterface* Material);
 
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI")
+	void RemoveImagePreviewTarget(FName TargetName);
+	
 	/** If true, send the current splat's image to ComfyUI when loading. If false, send the next splat's image (default). */
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI")
 	void SetSendCurrentSplatImageToComfyUI(bool bSendCurrent);
@@ -78,34 +101,38 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
 	bool bSendCurrentSplatImageToComfyUI = false;
 
-	// Material path for image preview (default: M_image with "Image" texture param)
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
-	FSoftObjectPath ImagePreviewMaterialPath = FSoftObjectPath(TEXT("/Game/_GENERATED/Materials/M_image.M_image"));
+	TSoftObjectPtr<UMaterialInterface> ImagePreviewMaterialAsset = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/_GENERATED/Materials/M_image.M_image")));
 
 	/** If true, overlay text (e.g. filename) onto the preview image using a canvas render target */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview")
 	bool bAddTextToImagePreview = true;
+
 	/** Text to display on the preview. Use {0} for filename, {1} for index (e.g. "Frame: {0} ({1}/{2})") */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
 	FString ImagePreviewTextFormat = TEXT("{0}");
+
 	/** Position of the text overlay in pixels (X, Y from top-left) */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
 	FVector2D ImagePreviewTextPosition = FVector2D(10, 10);
+
 	/** Scale of the text (3.0 = default size) */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
 	float ImagePreviewTextScale = 3.0f;
-	/** If true, draw a drop shadow behind text for better readability on any background */
+
 	/** If true, image preview starts at full opacity and fades to 0 when cycle changes. M_image must have an "Opacity" scalar parameter. */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview")
 	bool bFadeImagePreviewOpacity = true;
-	/** Seconds at full opacity before fade starts (e.g. 4.0 = show image clearly for 4 sec, then fade) */
+
+	/** Seconds at full opacity before fade starts */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bFadeImagePreviewOpacity", ClampMin = "0.0", ClampMax = "60.0"))
 	float ImagePreviewOpacityHoldDuration = 4.0f;
-	/** Duration in seconds for opacity to fade from 100% to 0% after the hold (e.g. 4.0 = fade over 4 sec after hold) */
+
+	/** Duration in seconds for opacity to fade from 100% to 0% after the hold */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bFadeImagePreviewOpacity", ClampMin = "0.1", ClampMax = "60.0"))
 	float ImagePreviewOpacityFadeDuration = 4.0f;
 
-	// Event broadcast when splat bounds are updated (useful for other subsystems to react)
+	// Event broadcast when splat bounds are updated
 	UPROPERTY(BlueprintAssignable, Category = "SplatCreator")
 	FOnSplatBoundsUpdated OnSplatBoundsUpdated;
 
@@ -113,10 +140,12 @@ public:
 	/** Material with World Position Offset for plane-to-3D. Must have MorphProgress scalar param and use PerInstanceCustomData index 4 for Y offset (negated for 180° yaw). */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph")
 	FSoftObjectPath PlaneMorphMaterialPath = FSoftObjectPath(TEXT("/Game/_GENERATED/Materials/M_SplatMorph.M_SplatMorph"));
+
 	/** Duration of the plane-to-3D morph in seconds */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph", meta = (ClampMin = "0.1", ClampMax = "5.0"))
 	float PlaneMorphDuration = 1.5f;
-	/** World Y of the flat plane (camera/start position). Points flatten to this Y, then morph to original. With 180° yaw, local Y = -PlaneMorphY */
+
+	/** World Y of the flat plane */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph")
 	float PlaneMorphY = -160.0f;
 
@@ -124,83 +153,96 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Rendering")
 	bool bVisibleFromInside = true;
 
-	/** Interval in seconds between automatic PLY cycle changes (only when not using bCycleSplatOnComfyFrame) */
+	/** Interval in seconds between automatic PLY cycle changes */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Cycle", meta = (EditCondition = "!bCycleSplatOnComfyFrame", ClampMin = "1.0", ClampMax = "300.0"))
 	float CycleIntervalSeconds = 16.0f;
-	/** Delay in seconds after cycle change before morphing starts (splat stays flat until this elapses) */
+
+	/** Delay in seconds after cycle change before morphing starts */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Cycle", meta = (ClampMin = "0.0", ClampMax = "60.0"))
 	float MorphStartDelaySeconds = 8.0f;
 
 private:
 	bool bIsInitialized = false;
+
 	// PLY file management
 	TArray<FString> PlyFiles;
 	int32 CurrentFileIndex = 0;
-	int32 NextFileIndex = -1;  // Pre-chosen next index; image for this is sent to ComfyUI so splat change matches received image
+	int32 NextFileIndex = -1;
 	FTimerHandle CycleTimer;
-	
+
 	// Point cloud rendering
-	AActor* CurrentPointCloudActor = nullptr;
-	UInstancedStaticMeshComponent* PointCloudComponent = nullptr;
-	
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> CurrentPointCloudActor = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInstancedStaticMeshComponent> PointCloudComponent = nullptr;
+
+	UPROPERTY(Transient)
+	TArray<FImagePreviewTarget> ImagePreviewTargets;
+
 	// Plane-to-3D material morph (GPU-based)
 	FTimerHandle PlaneMorphTimer;
 	FTimerHandle MorphStartDelayTimer;
 	bool bIsPlaneMorphing = false;
 	float PlaneMorphStartTime = 0.0f;
+
 	UPROPERTY()
-	UMaterialInstanceDynamic* SplatMorphMID = nullptr;
-	TArray<float> SphereSizes; // Adaptive sphere sizes for each point
-	
-	// Current splat bounding box (stored after loading)
+	TObjectPtr<UMaterialInstanceDynamic> SplatMorphMID = nullptr;
+
+	TArray<float> SphereSizes;
+
+	// Current splat bounding box
 	FBox CurrentSplatBounds;
 	bool bHasSplatBounds = false;
-	
-	// Current point positions (scaled and offset) for dense region detection
+
+	// Current point positions
 	TArray<FVector> CurrentPointPositions;
-	
+
 	// Bobbing animation system
 	EBobbingDirection CurrentBobbingDirection = EBobbingDirection::None;
 	FTimerHandle BobbingTimer;
 	bool bIsBobbing = false;
 	float BobbingTime = 0.0f;
-	float BaseBobbingSpeed = 2.0f; // Base oscillations per second
-	float BobbingSpeedMultiplier = 1.0f; // Speed multiplier (1.0 = normal, 2.0 = faster, 0.5 = slower)
-	float BobbingAmplitude = 20.0f; // Distance to bob in Unreal units
-	TArray<FVector> BasePointPositions; // Store original positions for bobbing
-	
+	float BaseBobbingSpeed = 2.0f;
+	float BobbingSpeedMultiplier = 1.0f;
+	float BobbingAmplitude = 20.0f;
+	TArray<FVector> BasePointPositions;
+
 	// Scaling system
-	float SplatScaleMultiplier = 1.0f; // Scale multiplier (1.0 = normal, >1.0 = bigger, <1.0 = smaller)
-	
-	// ComfyUI image send (when PLY changes, send matching PNG to channel 2)
+	float SplatScaleMultiplier = 1.0f;
+
+	// ComfyUI image send
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI")
 	bool bSendImageToComfyUIOnPlyChange = true;
+
 	// When true, splat changes when a new frame is received from ComfyUI instead of on a timer
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
 	bool bCycleSplatOnComfyFrame = false;
+
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
 	FString ComfyUIWebSocketHost = TEXT("127.0.0.1");
+
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI", meta = (EditCondition = "bSendImageToComfyUIOnPlyChange"))
 	int32 ComfyUIImageChannel = 2;
-	UPROPERTY()
-	class UComfyImageSender* ComfyImageSender = nullptr;
-	UPROPERTY()
-	class UComfyPngDecoder* ImageDecoder = nullptr;
 
-	// Image preview on plane (image sent to ComfyUI is also displayed here)
-	TWeakObjectPtr<UPrimitiveComponent> ImagePreviewPlaneComponent;
-	TWeakObjectPtr<UMaterialInterface> ImagePreviewMaterial;
 	UPROPERTY()
-	UMaterialInstanceDynamic* ImagePreviewMID = nullptr;
+	TObjectPtr<class UComfyImageSender> ComfyImageSender = nullptr;
 
-	// Text overlay on image (canvas render target compositing)
 	UPROPERTY()
-	class UCanvasRenderTarget2D* CanvasRenderTargetForText = nullptr;
+	TObjectPtr<class UComfyPngDecoder> ImageDecoder = nullptr;
+
+	// Text overlay on image
 	UPROPERTY()
-	UTexture2D* TextOverlaySourceTexture = nullptr;  // Texture to draw in canvas callback
-	FString TextOverlayDisplayText;  // Text to draw in canvas callback
+	TObjectPtr<class UCanvasRenderTarget2D> CanvasRenderTargetForText = nullptr;
+
+	UPROPERTY()
+	TObjectPtr<UTexture2D> TextOverlaySourceTexture = nullptr;
+
+	FString TextOverlayDisplayText;
+
 	UFUNCTION()
 	void OnCanvasRenderTargetUpdate(UCanvas* Canvas, int32 Width, int32 Height);
+
 	FTimerHandle ImagePreviewOpacityFadeTimer;
 	float ImagePreviewOpacityFadeStartTime = 0.0f;
 	void UpdateImagePreviewOpacityFade();
@@ -208,21 +250,21 @@ private:
 	// Random movement system
 	FTimerHandle RandomMovementTimer;
 	bool bIsRandomMoving = false;
-	float BaseRandomMovementSpeed = 50.0f; // Base units per second
-	float RandomMovementSpeedMultiplier = 1.0f; // Speed multiplier for random movement
-	float RandomMovementRadius = 100.0f; // Maximum distance from base position
-	TArray<FVector> RandomVelocities; // Per-sphere random velocities
-	TArray<FVector> RandomTargets; // Per-sphere random target positions
-	TArray<FVector> RandomCurrentPositions; // Current positions of spheres during random movement
-	float RandomChangeInterval = 2.0f; // How often to change random directions (seconds)
+	float BaseRandomMovementSpeed = 50.0f;
+	float RandomMovementSpeedMultiplier = 1.0f;
+	float RandomMovementRadius = 100.0f;
+	TArray<FVector> RandomVelocities;
+	TArray<FVector> RandomTargets;
+	TArray<FVector> RandomCurrentPositions;
+	float RandomChangeInterval = 2.0f;
 	float RandomChangeTimer = 0.0f;
-	
+
 	// Smooth interpolation system for stopping
 	bool bIsInterpolatingToBase = false;
 	float InterpolationTime = 0.0f;
-	float InterpolationDuration = 1.0f; // Duration of interpolation in seconds
-	TArray<FVector> InterpolationStartPositions; // Starting positions for interpolation
-	
+	float InterpolationDuration = 1.0f;
+	TArray<FVector> InterpolationStartPositions;
+
 	// Functions
 	void ScanForPLYFiles();
 	void CycleToNextPLY();
@@ -243,7 +285,7 @@ private:
 	void UpdateInterpolationToBase();
 	void ScaleSplat(float NewScaleMultiplier);
 	void UpdateSplatScale();
-	void ResetToNormal(); // Reset all transformations to default state
+	void ResetToNormal();
 	void TrySendImageToComfyUI(const FString& PLYPath);
 	void UpdateImagePreview(const FString& PLYPath);
 
