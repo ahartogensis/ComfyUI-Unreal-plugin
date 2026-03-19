@@ -120,6 +120,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
 	float ImagePreviewTextScale = 3.0f;
 
+	/** Duration in seconds for opacity to fade from 0% to 100% when a new image appears. 0 = no fade-in. */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float ImagePreviewOpacityFadeInDuration = 1.0f;
+
 	/** If true, image preview starts at full opacity and fades to 0 when cycle changes. M_image must have an "Opacity" scalar parameter. */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview")
 	bool bFadeImagePreviewOpacity = true;

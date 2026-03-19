@@ -346,11 +346,13 @@ void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 		}
 
 		Target.MID->SetTextureParameterValue(TEXT("Image"), FinalTexture);
-		Target.MID->SetScalarParameterValue(TEXT("Opacity"), 1.0f);
+		const float InitialOpacity = (ImagePreviewOpacityFadeInDuration > 0.0f) ? 0.0f : 1.0f;
+		Target.MID->SetScalarParameterValue(TEXT("Opacity"), InitialOpacity);
 		Plane->SetMaterial(0, Target.MID);
 	}
 
-	if (bFadeImagePreviewOpacity)
+	const bool bNeedsFadeTimer = (ImagePreviewOpacityFadeInDuration > 0.0f) || bFadeImagePreviewOpacity;
+	if (bNeedsFadeTimer)
 	{
 		if (UWorld* World = GetWorld())
 		{
@@ -370,11 +372,6 @@ void USplatCreatorSubsystem::UpdateImagePreview(const FString& PLYPath)
 
 void USplatCreatorSubsystem::UpdateImagePreviewOpacityFade()
 {
-	if (!bFadeImagePreviewOpacity)
-	{
-		return;
-	}
-
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -382,16 +379,23 @@ void USplatCreatorSubsystem::UpdateImagePreviewOpacityFade()
 	}
 
 	const float Elapsed = World->GetTimeSeconds() - ImagePreviewOpacityFadeStartTime;
-
 	float Opacity = 1.0f;
 
-	if (Elapsed <= ImagePreviewOpacityHoldDuration)
+	// Phase 1: Fade in (0 -> 1) over ImagePreviewOpacityFadeInDuration
+	if (ImagePreviewOpacityFadeInDuration > 0.0f && Elapsed < ImagePreviewOpacityFadeInDuration)
+	{
+		Opacity = FMath::Clamp(Elapsed / ImagePreviewOpacityFadeInDuration, 0.0f, 1.0f);
+	}
+	// Phase 2: Hold at full opacity
+	else if (Elapsed < ImagePreviewOpacityFadeInDuration + ImagePreviewOpacityHoldDuration)
 	{
 		Opacity = 1.0f;
 	}
-	else
+	// Phase 3: Fade out (1 -> 0) if enabled
+	else if (bFadeImagePreviewOpacity)
 	{
-		const float FadeElapsed = Elapsed - ImagePreviewOpacityHoldDuration;
+		const float FadeOutStart = ImagePreviewOpacityFadeInDuration + ImagePreviewOpacityHoldDuration;
+		const float FadeElapsed = Elapsed - FadeOutStart;
 		const float Alpha = FMath::Clamp(FadeElapsed / ImagePreviewOpacityFadeDuration, 0.0f, 1.0f);
 		Opacity = 1.0f - Alpha;
 	}
@@ -404,7 +408,10 @@ void USplatCreatorSubsystem::UpdateImagePreviewOpacityFade()
 		}
 	}
 
-	if (Opacity <= 0.0f)
+	// Clear timer when fully faded out, or when done with fade-in and no fade-out
+	const bool bFadeOutComplete = bFadeImagePreviewOpacity && Opacity <= 0.0f;
+	const bool bFadeInOnlyComplete = !bFadeImagePreviewOpacity && Elapsed >= ImagePreviewOpacityFadeInDuration;
+	if (bFadeOutComplete || bFadeInOnlyComplete)
 	{
 		World->GetTimerManager().ClearTimer(ImagePreviewOpacityFadeTimer);
 	}
