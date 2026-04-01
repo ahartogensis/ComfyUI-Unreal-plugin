@@ -5,8 +5,12 @@
 #include "Engine/World.h"
 #include "Engine/Canvas.h"
 #include "Engine/CanvasRenderTarget2D.h"
+#include "CanvasItem.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Engine.h"
+#include "Engine/Font.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Fonts/FontMeasure.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "GameFramework/Actor.h"
@@ -420,6 +424,7 @@ void USplatCreatorSubsystem::UpdateImagePreviewOpacityFade()
 void USplatCreatorSubsystem::OnCanvasRenderTargetUpdate(UCanvas* Canvas, int32 Width, int32 Height)
 {
 	if (!Canvas) return;
+
 	UTexture2D* SourceTex = TextOverlaySourceTexture;
 	if (SourceTex && IsValid(SourceTex))
 	{
@@ -432,25 +437,101 @@ void USplatCreatorSubsystem::OnCanvasRenderTargetUpdate(UCanvas* Canvas, int32 W
 	}
 	if (!TextOverlayDisplayText.IsEmpty())
 	{
-		UFont* Font = GEngine ? GEngine->GetLargeFont() : nullptr;
-		if (!Font && GEngine) Font = GEngine->GetMediumFont();
-		if (Font)
+		const float X = ImagePreviewTextPosition.X;
+		const float Y = ImagePreviewTextPosition.Y;
+		const float MaxTextWidth = FMath::Max(4.0f, static_cast<float>(Width) - X - ImagePreviewTextRightMargin);
+
+		// FCanvasTextItem only draws when the UFont pointer is set; FCoreStyle fonts often have no FontObject,
+		// so HasValidText() fails and nothing is drawn. Use an engine UFont + legacy Slate font info instead.
+		UFont* EngineFont = (GEngine && GEngine->GetMediumFont()) ? GEngine->GetMediumFont() : nullptr;
+		if (!EngineFont && GEngine)
 		{
-			const float X = ImagePreviewTextPosition.X;
-			const float Y = ImagePreviewTextPosition.Y;
-			const float S = ImagePreviewTextScale;
-			FFontRenderInfo RenderInfo;
-			Canvas->DrawColor = FColor::Black;
-			Canvas->DrawText(Font, TextOverlayDisplayText, X + 2.0f, Y + 2.0f, S, S, RenderInfo);  // shadow
+			EngineFont = GEngine->GetSmallFont();
+		}
+
+		FSlateRenderer* SlateRenderer = FSlateApplication::IsInitialized() ? FSlateApplication::Get().GetRenderer() : nullptr;
+
+		const bool bCanDrawSlateText =
+			SlateRenderer != nullptr
+			&& Canvas->Canvas
+			&& EngineFont != nullptr;
+
+		if (bCanDrawSlateText)
+		{
+			TSharedRef<FSlateFontMeasure> FontMeasure = SlateRenderer->GetFontMeasureService();
+
+			int32 FontSize = FMath::Clamp(
+				FMath::RoundToInt(6.0f * ImagePreviewTextScale),
+				ImagePreviewTextMinFontSize,
+				256);
+
+			FSlateFontInfo FontInfo = EngineFont->GetLegacySlateFontInfo();
+			FontInfo.Size = static_cast<float>(FontSize);
+
+			auto MeasureW = [&](const FSlateFontInfo& Info) -> float
 			{
-				const float O = 1.5f;
-				Canvas->DrawText(Font, TextOverlayDisplayText, X - O, Y, S, S, RenderInfo);
-				Canvas->DrawText(Font, TextOverlayDisplayText, X + O, Y, S, S, RenderInfo);
-				Canvas->DrawText(Font, TextOverlayDisplayText, X, Y - O, S, S, RenderInfo);
-				Canvas->DrawText(Font, TextOverlayDisplayText, X, Y + O, S, S, RenderInfo);
-			}  // outline
-			Canvas->DrawColor = FColor::White;
-			Canvas->DrawText(Font, TextOverlayDisplayText, X, Y, S, S, RenderInfo);
+				return FontMeasure->Measure(FStringView(TextOverlayDisplayText), Info, 1.0f).X;
+			};
+
+			if (bImagePreviewTextAutoFitWidth)
+			{
+				float W = MeasureW(FontInfo);
+				if (W > MaxTextWidth && W > KINDA_SMALL_NUMBER)
+				{
+					FontSize = FMath::Max(ImagePreviewTextMinFontSize, FMath::FloorToInt(FontSize * (MaxTextWidth / W)));
+					FontInfo = EngineFont->GetLegacySlateFontInfo();
+					FontInfo.Size = static_cast<float>(FontSize);
+				}
+				for (int32 Guard = 0; Guard < 256 && FontSize > ImagePreviewTextMinFontSize; ++Guard)
+				{
+					W = MeasureW(FontInfo);
+					if (W <= MaxTextWidth)
+					{
+						break;
+					}
+					--FontSize;
+					FontInfo = EngineFont->GetLegacySlateFontInfo();
+					FontInfo.Size = static_cast<float>(FontSize);
+				}
+			}
+
+			FCanvasTextItem TextItem(FVector2D(X, Y), FText::FromString(TextOverlayDisplayText), FontInfo, FLinearColor::White);
+			TextItem.Scale = FVector2D(1.0f, 1.0f);
+			TextItem.EnableShadow(FLinearColor::Black, FVector2D(2.0f, 2.0f));
+			TextItem.bOutlined = true;
+			TextItem.OutlineColor = FLinearColor::Black;
+			Canvas->DrawItem(TextItem);
+		}
+		else
+		{
+			UFont* Font = GEngine ? GEngine->GetLargeFont() : nullptr;
+			if (!Font && GEngine) Font = GEngine->GetMediumFont();
+			if (Font)
+			{
+				float S = ImagePreviewTextScale;
+				if (bImagePreviewTextAutoFitWidth)
+				{
+					float XL = 0.0f;
+					float YL = 0.0f;
+					Canvas->TextSize(Font, TextOverlayDisplayText, XL, YL, S, S);
+					if (XL > MaxTextWidth && XL > KINDA_SMALL_NUMBER)
+					{
+						S *= (MaxTextWidth / XL);
+					}
+				}
+				FFontRenderInfo RenderInfo;
+				Canvas->DrawColor = FColor::Black;
+				Canvas->DrawText(Font, TextOverlayDisplayText, X + 2.0f, Y + 2.0f, S, S, RenderInfo);
+				{
+					const float O = 1.5f;
+					Canvas->DrawText(Font, TextOverlayDisplayText, X - O, Y, S, S, RenderInfo);
+					Canvas->DrawText(Font, TextOverlayDisplayText, X + O, Y, S, S, RenderInfo);
+					Canvas->DrawText(Font, TextOverlayDisplayText, X, Y - O, S, S, RenderInfo);
+					Canvas->DrawText(Font, TextOverlayDisplayText, X, Y + O, S, S, RenderInfo);
+				}
+				Canvas->DrawColor = FColor::White;
+				Canvas->DrawText(Font, TextOverlayDisplayText, X, Y, S, S, RenderInfo);
+			}
 		}
 	}
 }
@@ -492,6 +573,75 @@ void USplatCreatorSubsystem::CycleToNextSplat()
 	}
 }
 
+float USplatCreatorSubsystem::GetCycleLength() const
+{
+	return CycleIntervalSeconds;
+}
+
+void USplatCreatorSubsystem::SetCycleLength(float NewCycleLengthSeconds)
+{
+	// Clamp to valid range (1 to 300 seconds)
+	CycleIntervalSeconds = FMath::Clamp(NewCycleLengthSeconds, 1.0f, 300.0f);
+	
+	// If the timer is active (not using Comfy frame cycling), restart it with the new interval
+	if (bIsInitialized && !bCycleSplatOnComfyFrame)
+	{
+		UWorld* World = GetWorld();
+		if (World && CycleTimer.IsValid())
+		{
+			World->GetTimerManager().ClearTimer(CycleTimer);
+			World->GetTimerManager().SetTimer(
+				CycleTimer,
+				this,
+				&USplatCreatorSubsystem::CycleToNextPLY,
+				CycleIntervalSeconds,
+				true
+			);
+			if(debug) UE_LOG(LogTemp, Display, TEXT("[SplatCreator] Cycle length updated to %.1f seconds"), CycleIntervalSeconds);
+		}
+	}
+}
+
+float USplatCreatorSubsystem::GetPreviewImageFadeInDuration() const
+{
+	return ImagePreviewOpacityFadeInDuration;
+}
+
+void USplatCreatorSubsystem::SetPreviewImageFadeInDuration(float DurationSeconds)
+{
+	ImagePreviewOpacityFadeInDuration = FMath::Clamp(DurationSeconds, 0.0f, 10.0f);
+}
+
+float USplatCreatorSubsystem::GetPreviewImageHoldDuration() const
+{
+	return ImagePreviewOpacityHoldDuration;
+}
+
+void USplatCreatorSubsystem::SetPreviewImageHoldDuration(float DurationSeconds)
+{
+	ImagePreviewOpacityHoldDuration = FMath::Clamp(DurationSeconds, 0.0f, 60.0f);
+}
+
+float USplatCreatorSubsystem::GetPreviewImageFadeOutDuration() const
+{
+	return ImagePreviewOpacityFadeDuration;
+}
+
+void USplatCreatorSubsystem::SetPreviewImageFadeOutDuration(float DurationSeconds)
+{
+	ImagePreviewOpacityFadeDuration = FMath::Clamp(DurationSeconds, 0.1f, 60.0f);
+}
+
+bool USplatCreatorSubsystem::GetPreviewImageFadeEnabled() const
+{
+	return bFadeImagePreviewOpacity;
+}
+
+void USplatCreatorSubsystem::SetPreviewImageFadeEnabled(bool bEnabled)
+{
+	bFadeImagePreviewOpacity = bEnabled;
+}
+
 void USplatCreatorSubsystem::CycleToNextPLY()
 {
 	if (PlyFiles.Num() == 0)
@@ -531,6 +681,9 @@ void USplatCreatorSubsystem::CycleToNextPLY()
 
 void USplatCreatorSubsystem::LoadPLYFile(const FString& PLYPath)
 {
+	CurrentLoadedPlyPath = FPaths::ConvertRelativePathToFull(PLYPath);
+	FPaths::NormalizeFilename(CurrentLoadedPlyPath);
+
 	// Clear any pending morph delay (new cycle supersedes it)
 	if (UWorld* World = GetWorld())
 	{
@@ -975,6 +1128,16 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	for (const FVector& Pos : Positions) ScaledPositions.Add(Pos * 125.0f);
 	CalculateAdaptiveSphereSizes(ScaledPositions, SphereSizes);
 	const float FlatPlaneY = -PlaneMorphY;
+	float FlatMorphZ = PlaneMorphFlatZ;
+	if (bPlaneMorphZFromLowestPoint && ScaledPositions.Num() > 0)
+	{
+		float MinZ = ScaledPositions[0].Z;
+		for (const FVector& P : ScaledPositions)
+		{
+			MinZ = FMath::Min(MinZ, P.Z);
+		}
+		FlatMorphZ = MinZ - PlaneMorphZLowestMargin;
+	}
 	const FVector DownOffset = FVector(0.0f, 0.0f, 0.0f);
 	const int32 NumInstances = FMath::Min(Positions.Num(), Colors.Num());
 	
@@ -1018,8 +1181,11 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 	// Create ISM component (plain ISM to avoid HISM's aggressive internal culling when camera is inside)
 	PointCloudComponent = NewObject<UInstancedStaticMeshComponent>(CurrentPointCloudActor);
 	PointCloudComponent->SetStaticMesh(SphereMesh);
-	// Plane morph uses custom data slot 4 for Y offset (negated: FlatY - TargetY for 180° yaw / world-space WPO)
-	PointCloudComponent->SetNumCustomDataFloats(5);  // slot 4 for plane morph Y offset
+	// Slots 0–3: color; 4: Y morph offset; 5: optional Z morph offset (flatZ - pointZ)
+	const int32 CustomDataFloatCount = bMorphMaterialLoaded
+		? (bPlaneMorphIncludeZ ? 6 : 5)
+		: 5;
+	PointCloudComponent->SetNumCustomDataFloats(CustomDataFloatCount);
 	PointCloudComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	PointCloudComponent->SetCastShadow(false);
 	PointCloudComponent->SetVisibility(true);
@@ -1129,7 +1295,8 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		{
 			for (const FVector& Pos : ScaledPositions)
 			{
-				BoundingBox += FVector(Pos.X, FlatPlaneY, Pos.Z);
+				const float FlatZBounds = bPlaneMorphIncludeZ ? FlatMorphZ : Pos.Z;
+				BoundingBox += FVector(Pos.X, FlatPlaneY, FlatZBounds);
 			}
 		}
 		
@@ -1181,9 +1348,14 @@ void USplatCreatorSubsystem::CreatePointCloud(const TArray<FVector>& Positions, 
 		PointCloudComponent->SetCustomDataValue(i, 3, Colors[i].A / 255.0f);
 		if (bMorphMaterialLoaded && i < ScaledPositions.Num())
 		{
-			// World-space Y delta: FlatPlaneY - TargetY (negated local offset for 180° yaw; WPO is world space)
-			float YOffsetWorld = FlatPlaneY - ScaledPositions[i].Y;
+			// Y / Z deltas applied in material as (1 - MorphProgress) * offset so progress 0 = flat, 1 = full 3D
+			const float YOffsetWorld = FlatPlaneY - ScaledPositions[i].Y;
 			PointCloudComponent->SetCustomDataValue(i, 4, YOffsetWorld);
+			if (bPlaneMorphIncludeZ)
+			{
+				const float ZOffsetWorld = FlatMorphZ - ScaledPositions[i].Z;
+				PointCloudComponent->SetCustomDataValue(i, 5, ZOffsetWorld);
+			}
 		}
 	}
 	
@@ -1429,6 +1601,15 @@ FBox USplatCreatorSubsystem::GetSplatBounds() const
 		return CurrentSplatBounds.TransformBy(CurrentPointCloudActor->GetActorTransform());
 	}
 	return CurrentSplatBounds;
+}
+
+FString USplatCreatorSubsystem::GetCurrentSplatPlyBaseName() const
+{
+	if (CurrentLoadedPlyPath.IsEmpty())
+	{
+		return FString();
+	}
+	return FPaths::GetBaseFilename(CurrentLoadedPlyPath);
 }
 
 TArray<FVector> USplatCreatorSubsystem::GetDensePointRegions(float DensityThreshold) const

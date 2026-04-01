@@ -21,6 +21,7 @@ AComfyStreamActor::AComfyStreamActor()
 	DisplayMesh->SetupAttachment(RootComponent);
 
 	ComfyStreamComponent = CreateDefaultSubobject<UComfyStreamComponent>(TEXT("ComfyStreamComponent"));
+	ComfyStreamComponent->bSuppressStreamConfigInEditor = true;
 
 	SegmentationChannelConfig.ChannelNumber = 1;
 	SegmentationChannelConfig.ChannelType   = EComfyChannel::Segmentation;

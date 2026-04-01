@@ -63,6 +63,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	FBox GetSplatBounds() const;
 
+	/** Base filename (no extension) of the PLY currently loaded, e.g. "scene" for scene.ply. Empty if none loaded yet. */
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
+	FString GetCurrentSplatPlyBaseName() const;
+
 	// Get dense point regions (points with high density) for object placement
 	// Returns positions of points that are in dense areas (small sphere sizes indicate density)
 	// DensityThreshold: maximum sphere size to consider as dense (default 0.15, where 0.1=dense, 0.3=sparse)
@@ -84,6 +88,47 @@ public:
 	// Cycle to the next splat. Called by ComfyStreamActor when bCycleSplatOnComfyFrame is true and a new frame is received.
 	UFUNCTION(BlueprintCallable, Category = "SplatCreator")
 	void CycleToNextSplat();
+
+	// Get the current cycle interval in seconds (how often splats automatically change)
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|Cycle")
+	float GetCycleLength() const;
+
+	// Set the cycle interval in seconds (how often splats automatically change)
+	// Only takes effect when bCycleSplatOnComfyFrame is false
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|Cycle")
+	void SetCycleLength(float NewCycleLengthSeconds);
+
+	// Get the preview image fade in duration in seconds
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	float GetPreviewImageFadeInDuration() const;
+
+	// Set the preview image fade in duration (0 to 10 seconds)
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	void SetPreviewImageFadeInDuration(float DurationSeconds);
+
+	// Get the preview image hold duration (time at full opacity before fading out)
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	float GetPreviewImageHoldDuration() const;
+
+	// Set the preview image hold duration in seconds (0 to 60 seconds)
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	void SetPreviewImageHoldDuration(float DurationSeconds);
+
+	// Get the preview image fade out duration in seconds
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	float GetPreviewImageFadeOutDuration() const;
+
+	// Set the preview image fade out duration (0.1 to 60 seconds)
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	void SetPreviewImageFadeOutDuration(float DurationSeconds);
+
+	// Get whether preview image opacity fading is enabled
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	bool GetPreviewImageFadeEnabled() const;
+
+	// Set whether preview image opacity fading is enabled
+	UFUNCTION(BlueprintCallable, Category = "SplatCreator|ComfyUI|Image Preview")
+	void SetPreviewImageFadeEnabled(bool bEnabled);
 
 	// Register or update an image preview target for a specific blueprint/plane.
 	// Each target name stores its own plane, material, and MID.
@@ -116,9 +161,21 @@ public:
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
 	FVector2D ImagePreviewTextPosition = FVector2D(10, 10);
 
-	/** Scale of the text (3.0 = default size) */
-	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
+	/** Approximate size multiplier for preview text (maps to Slate font point size; higher = larger). Ignored for auto-fit except as the starting size. */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview", ClampMin = "0.5", ClampMax = "20.0"))
 	float ImagePreviewTextScale = 3.0f;
+
+	/** If true, shrink the font so the full string fits on one line between Text Position X and (texture width - Right Margin). */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview"))
+	bool bImagePreviewTextAutoFitWidth = true;
+
+	/** Pixels reserved on the right of the texture when auto-fitting (and measuring) one-line text. */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview", ClampMin = "0.0"))
+	float ImagePreviewTextRightMargin = 12.0f;
+
+	/** Minimum Slate font size (points) when auto-fitting; prevents unreadably small labels. */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (EditCondition = "bAddTextToImagePreview", ClampMin = "6", ClampMax = "48"))
+	int32 ImagePreviewTextMinFontSize = 8;
 
 	/** Duration in seconds for opacity to fade from 0% to 100% when a new image appears. 0 = no fade-in. */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|ComfyUI|Image Preview", meta = (ClampMin = "0.0", ClampMax = "10.0"))
@@ -141,7 +198,11 @@ public:
 	FOnSplatBoundsUpdated OnSplatBoundsUpdated;
 
 	// --- Plane-to-3D Material Morph (GPU-based, flat->3D transition) ---
-	/** Material with World Position Offset for plane-to-3D. Must have MorphProgress scalar param and use PerInstanceCustomData index 4 for Y offset (negated for 180° yaw). */
+	/**
+	 * Material with World Position Offset. Needs scalar MorphProgress (0=flat, 1=3D).
+	 * PerInstanceCustomData index 4: Y offset (flatY - pointY). Index 5 when bPlaneMorphIncludeZ: Z offset (flatZ - pointZ).
+	 * WPO should apply (1 - MorphProgress) * those offsets (see README).
+	 */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph")
 	FSoftObjectPath PlaneMorphMaterialPath = FSoftObjectPath(TEXT("/Game/_GENERATED/Materials/M_SplatMorph.M_SplatMorph"));
 
@@ -152,6 +213,24 @@ public:
 	/** World Y of the flat plane */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph")
 	float PlaneMorphY = -160.0f;
+
+	/** If true, custom data slot 5 supplies Z offset (flatZ - pointZ) so all points share PlaneMorphFlatZ at start, then settle to each point's real Z. */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph")
+	bool bPlaneMorphIncludeZ = true;
+
+	/**
+	 * Z all instances use at morph start (same space as scaled PLY / instance transforms). Default 0 = horizontal sheet at Z=0, then morph to original Z.
+	 * Ignored when bPlaneMorphZFromLowestPoint is true.
+	 */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph", meta = (EditCondition = "!bPlaneMorphZFromLowestPoint"))
+	float PlaneMorphFlatZ = 0.0f;
+
+	/** If true, flat Z is (lowest point Z - margin) instead of PlaneMorphFlatZ. Default off so Z starts at 0. */
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph")
+	bool bPlaneMorphZFromLowestPoint = false;
+
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|Plane Morph", meta = (EditCondition = "bPlaneMorphZFromLowestPoint", ClampMin = "0"))
+	float PlaneMorphZLowestMargin = 50.0f;
 
 	/** If true, use reversed culling so points are visible when camera is inside the cloud. Prefer enabling Two Sided on the material instead. */
 	UPROPERTY(EditAnywhere, Category = "SplatCreator|Rendering")
@@ -170,6 +249,7 @@ private:
 
 	// PLY file management
 	TArray<FString> PlyFiles;
+	FString CurrentLoadedPlyPath;
 	int32 CurrentFileIndex = 0;
 	int32 NextFileIndex = -1;
 	FTimerHandle CycleTimer;

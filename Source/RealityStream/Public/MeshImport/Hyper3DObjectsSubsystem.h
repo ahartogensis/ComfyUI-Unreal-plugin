@@ -9,10 +9,12 @@ class UInstancedStaticMeshComponent;
 class UStaticMesh;
 class UTexture2D;
 class UMaterial;
+class UMaterialInstanceDynamic;
 
 /**
- * Imports all OBJ meshes (with optional textures) found in the plugin's MeshImport folder
- * and places them as static objects.
+ * Imports OBJ meshes (with optional textures) from MeshImport/<current PLY base name>/...
+ * where the folder name matches the loaded splat's PLY filename without extension.
+ * Other OBJs under MeshImport are ignored until that splat is active.
  */
 UCLASS(BlueprintType)
 class REALITYSTREAM_API UHyper3DObjectsSubsystem : public UGameInstanceSubsystem
@@ -31,13 +33,16 @@ public:
 
 	// Set the reference location for object positioning (objects will be placed relative to this location)
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
-	void SetReferenceLocation(const FVector& ReferenceLocation);
+	void SetReferenceLocation(const FVector& InReferenceLocation);
+
+	UFUNCTION(BlueprintPure, Category = "Hyper3DObjects")
+	FVector GetReferenceLocation() const;
 
 	// Set the total number of instances to spawn across all object meshes (randomly distributed, default: 20)
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void SetTotalInstances(int32 InTotalInstances);
 
-	// Update BoxSize and ReferenceLocation from splat dimensions (called automatically when splat bounds update)
+	// Update placement BoxSize from splat dimensions when bDrivePlacementBoxFromSplat is true (also on splat bounds updates via delegate)
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void UpdateFromSplatDimensions();
 
@@ -48,6 +53,69 @@ public:
 	// Automatically find and set ComfyStream actor exclusion zone (searches for AComfyStreamActor in the world)
 	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects")
 	void FindAndSetComfyStreamExclusionZone();
+
+	/**
+	 * If true (default), BoxSize is overwritten from splat bounds on each update (capped at 200).
+	 * If false, BoxSize is only changed from Blueprint or SetPlacementBoxSize — use this to pin placement (e.g. BoxSize = 0).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hyper3DObjects|Placement")
+	bool bDrivePlacementBoxFromSplat = true;
+
+	/** Edge length of the placement square in XY around ReferenceLocation (world units). When zero, XY spread is disabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hyper3DObjects|Placement", meta = (ClampMin = "0"))
+	float BoxSize = 200.0f;
+
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Placement")
+	void SetPlacementBoxSize(float InBoxSize);
+
+	/** Uniform scale applied to each imported OBJ actor (default in subsystem is 50). Updates existing spawns immediately. */
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Placement", meta = (ClampMin = "0.001"))
+	void SetHyper3DObjectScale(float InUniformScale);
+
+	UFUNCTION(BlueprintPure, Category = "Hyper3DObjects|Placement")
+	float GetHyper3DObjectScale() const;
+
+	// Get whether 3D object opacity fading is enabled
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Material")
+	bool GetHyper3DObjectFadeEnabled() const;
+
+	// Set whether 3D object opacity fading is enabled
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Material")
+	void SetHyper3DObjectFadeEnabled(bool bEnabled);
+
+	// Get the fade in duration for 3D objects in seconds
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Material")
+	float GetHyper3DObjectFadeInDuration() const;
+
+	// Set the fade in duration for 3D objects (0.01 to 60 seconds)
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Material")
+	void SetHyper3DObjectFadeInDuration(float DurationSeconds);
+
+	// Get the hold duration (time at full opacity) for 3D objects in seconds
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Material")
+	float GetHyper3DObjectHoldDuration() const;
+
+	// Set the hold duration for 3D objects (0 = stay visible forever)
+	UFUNCTION(BlueprintCallable, Category = "Hyper3DObjects|Material")
+	void SetHyper3DObjectHoldDuration(float DurationSeconds);
+
+	/** When true, opacity animates on each splat change: 0→1 over OpacityFadeInDurationSeconds, holds for OpacityHoldAtFullSeconds, then 0 (0 hold = stay visible). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hyper3DObjects|Material")
+	bool bFadeOpacityOnSplatChange = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hyper3DObjects|Material", meta = (ClampMin = "0.01", ClampMax = "60.0"))
+	float OpacityFadeInDurationSeconds = 2.0f;
+
+	/**
+	 * Seconds to keep opacity at 1 after fade-in completes, then it returns to 0 until the next splat change.
+	 * 0 = stay fully visible (no auto-hide).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hyper3DObjects|Material", meta = (ClampMin = "0"))
+	float OpacityHoldAtFullSeconds = 10.0f;
+
+	/** Must match the scalar parameter on M_ProceduralMeshTexture (default name: Opacity). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hyper3DObjects|Material")
+	FName OpacityScalarParameterName = TEXT("Opacity");
 
 protected:
 	virtual UWorld* GetWorld() const override;
@@ -67,6 +135,7 @@ private:
 		TWeakObjectPtr<UTexture2D> RoughnessTexture;
 		TWeakObjectPtr<UTexture2D> PBRTexture;
 		TWeakObjectPtr<UTexture2D> ShadedTexture;
+		TWeakObjectPtr<UMaterialInstanceDynamic> ProceduralMaterialMID;
 	};
 
 	void HandlePostWorldInit(UWorld* World, const UWorld::InitializationValues IVS);
@@ -82,6 +151,11 @@ private:
 	void RefreshObjects();
 	void UpdateObjectLayout();
 	void UpdateObjectMotion();
+
+	void BeginHyper3DOpacityFade();
+	void UpdateHyper3DOpacityFade(float WorldTimeSeconds);
+	float ComputeHyper3DOpacityAlpha(float WorldTimeSeconds) const;
+	void ApplyHyper3DOpacityToMID(UMaterialInstanceDynamic* MID, float Alpha) const;
 
 	struct FTextureSet
 	{
@@ -140,10 +214,12 @@ private:
 #if WITH_EDITOR
 	UMaterial* CreateMaterialWithTextureParameters() const;
 #endif
-	void ApplyMaterial(UProceduralMeshComponent* MeshComp, AActor* Owner, const FTextureSet& Textures, const TArray<FColor>& VertexColors) const;
+	UMaterialInstanceDynamic* ApplyMaterial(UProceduralMeshComponent* MeshComp, AActor* Owner, const FTextureSet& Textures, const TArray<FColor>& VertexColors);
 
 	FString GetImportDirectory() const;
 	void DestroyAllObjects();
+
+	void ApplyHyper3DScaleToAllInstances();
 
 private:
 	TWeakObjectPtr<UWorld> CachedWorld;
@@ -164,15 +240,13 @@ private:
 	// Track how many instances of each OBJ file have been spawned (for better distribution)
 	TMap<FString, int32> ObjInstanceCounts;
 
-	// Cached settings
-	float BoxSize = 200.0f;  // Size of the box volume for object placement (default: 200x200, constrained by splat dimensions)
 	int32 TotalInstances = 20;  // Total number of instances to spawn across all OBJ files (randomly distributed, default: 20)
 	float BaseHeight = 0.f;  // Base height for objects
 	float HeightVariance = 100.f;  // Height variance for different heights
 	float MinSpacingDistance = 50.0f;  // Minimum distance between objects (in world units) to ensure spacing
 	float ComfyStreamExclusionDistance = 100.0f;  // Minimum distance from ComfyStream actor to avoid intersection
 	float SplatPointExclusionDistance = 100.0f;  // Minimum distance from splat points to avoid intersection (increased from 50.0f)
-	float ImportScaleMultiplier = 25.0f;  // Reduced from 50.0f to make objects smaller
+	float ImportScaleMultiplier = 50.0f; 
 	FRotator BaseMeshRotation = FRotator(0.f, 0.f, -90.f);
 
 	// Reference location for object positioning (defaults to origin)
@@ -183,5 +257,10 @@ private:
 	bool bHasComfyStreamExclusion = false;  // Whether exclusion zone is set
 
 	bool bImportsActive = false;
+
+	float OpacityFadeStartWorldTime = 0.f;
+	bool bOpacityFadeTickActive = false;
+	/** After hold+fade cycle completed with opacity 0; new MIDs use 0 until next BeginHyper3DOpacityFade. */
+	bool bOpacityCycleEndedHidden = false;
 };
 

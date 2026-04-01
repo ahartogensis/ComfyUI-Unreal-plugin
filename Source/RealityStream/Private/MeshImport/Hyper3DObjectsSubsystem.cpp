@@ -59,6 +59,30 @@ namespace Hyper3DObjectsImport
 	{
 		return Radians * 57.29577951308232f;
 	}
+
+	/** OBJ must live under ImportDir/<SplatFolderName>/ (any depth). Empty SplatFolderName matches nothing. */
+	static bool IsObjUnderSplatFolder(const FString& AbsoluteObjPath, const FString& ImportDirFull, const FString& SplatFolderName)
+	{
+		if (SplatFolderName.IsEmpty())
+		{
+			return false;
+		}
+		FString AllowedRoot = ImportDirFull / SplatFolderName;
+		FPaths::NormalizeFilename(AllowedRoot);
+		if (!AbsoluteObjPath.StartsWith(AllowedRoot, ESearchCase::IgnoreCase))
+		{
+			return false;
+		}
+		if (AbsoluteObjPath.Len() > AllowedRoot.Len())
+		{
+			const TCHAR Boundary = AbsoluteObjPath[AllowedRoot.Len()];
+			if (Boundary != TEXT('/') && Boundary != TEXT('\\'))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
 }
 
 int debug = 0; //0 = off, 1 = on
@@ -148,6 +172,7 @@ void UHyper3DObjectsSubsystem::ActivateObjectImports()
 	UpdateFromSplatDimensions();
 
 	StartTimers(World);
+	BeginHyper3DOpacityFade();
 	RefreshObjects();
 }
 
@@ -177,19 +202,20 @@ void UHyper3DObjectsSubsystem::UpdateFromSplatDimensions()
 				return;
 			}
 
-			// Use splat dimensions only to constrain the box size
-			const float DesiredBoxSize = 200.0f;
-			float SplatBoxSize = FMath::Min(BoxSizeVector.X, BoxSizeVector.Y);
-			
-			if (SplatBoxSize > 0.0f)
+			if (bDrivePlacementBoxFromSplat)
 			{
-				// Use the smaller of desired size or splat size
-				BoxSize = FMath::Min(DesiredBoxSize, SplatBoxSize);
-			}
-			else
-			{
-				// Splat dimensions invalid, use default
-				BoxSize = DesiredBoxSize;
+				// Use splat dimensions only to constrain the box size
+				const float DesiredBoxSize = 200.0f;
+				float SplatBoxSize = FMath::Min(BoxSizeVector.X, BoxSizeVector.Y);
+				
+				if (SplatBoxSize > 0.0f)
+				{
+					BoxSize = FMath::Min(DesiredBoxSize, SplatBoxSize);
+				}
+				else
+				{
+					BoxSize = DesiredBoxSize;
+				}
 			}
 			
 			// Update object layout if objects are already spawned
@@ -207,8 +233,13 @@ void UHyper3DObjectsSubsystem::UpdateFromSplatDimensions()
 
 void UHyper3DObjectsSubsystem::OnSplatBoundsUpdatedHandler(FBox NewBounds)
 {
+	BeginHyper3DOpacityFade();
 	// Called automatically when splat bounds are updated
 	UpdateFromSplatDimensions();
+	if (bImportsActive)
+	{
+		RefreshObjects();
+	}
 }
 
 void UHyper3DObjectsSubsystem::DeactivateObjectImports()
@@ -238,6 +269,11 @@ void UHyper3DObjectsSubsystem::SetReferenceLocation(const FVector& InReferenceLo
 	{
 		UpdateObjectMotion();
 	}
+}
+
+FVector UHyper3DObjectsSubsystem::GetReferenceLocation() const
+{
+	return ReferenceLocation;
 }
 
 void UHyper3DObjectsSubsystem::SetComfyStreamExclusionZone(const FVector& ComfyStreamLocation)
@@ -298,6 +334,74 @@ void UHyper3DObjectsSubsystem::SetTotalInstances(int32 InTotalInstances)
 	else
 	{
 		if(debug) UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Imports are not active. Call ActivateObjectImports() first to see the changes."));
+	}
+}
+
+void UHyper3DObjectsSubsystem::SetPlacementBoxSize(float InBoxSize)
+{
+	BoxSize = FMath::Max(0.f, InBoxSize);
+	if (bImportsActive)
+	{
+		UpdateObjectLayout();
+	}
+}
+
+void UHyper3DObjectsSubsystem::SetHyper3DObjectScale(float InUniformScale)
+{
+	ImportScaleMultiplier = FMath::Max(0.001f, InUniformScale);
+	ApplyHyper3DScaleToAllInstances();
+}
+
+float UHyper3DObjectsSubsystem::GetHyper3DObjectScale() const
+{
+	return ImportScaleMultiplier;
+}
+
+bool UHyper3DObjectsSubsystem::GetHyper3DObjectFadeEnabled() const
+{
+	return bFadeOpacityOnSplatChange;
+}
+
+void UHyper3DObjectsSubsystem::SetHyper3DObjectFadeEnabled(bool bEnabled)
+{
+	bFadeOpacityOnSplatChange = bEnabled;
+}
+
+float UHyper3DObjectsSubsystem::GetHyper3DObjectFadeInDuration() const
+{
+	return OpacityFadeInDurationSeconds;
+}
+
+void UHyper3DObjectsSubsystem::SetHyper3DObjectFadeInDuration(float DurationSeconds)
+{
+	OpacityFadeInDurationSeconds = FMath::Clamp(DurationSeconds, 0.01f, 60.0f);
+}
+
+float UHyper3DObjectsSubsystem::GetHyper3DObjectHoldDuration() const
+{
+	return OpacityHoldAtFullSeconds;
+}
+
+void UHyper3DObjectsSubsystem::SetHyper3DObjectHoldDuration(float DurationSeconds)
+{
+	OpacityHoldAtFullSeconds = FMath::Max(0.0f, DurationSeconds);
+}
+
+void UHyper3DObjectsSubsystem::ApplyHyper3DScaleToAllInstances()
+{
+	const FVector S(ImportScaleMultiplier);
+	for (FObjectInstance& Instance : ObjectInstances)
+	{
+		AActor* ObjectActor = Instance.Actor.Get();
+		if (!ObjectActor)
+		{
+			continue;
+		}
+		ObjectActor->SetActorScale3D(S);
+		if (USceneComponent* RootComponent = ObjectActor->GetRootComponent())
+		{
+			RootComponent->SetWorldScale3D(S);
+		}
 	}
 }
 
@@ -445,13 +549,30 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 
 	ObjFilePaths.Sort();
 
+	FString SplatFolderName;
+	if (UGameInstance* GameInstance = World->GetGameInstance())
+	{
+		if (USplatCreatorSubsystem* SplatSubsystem = GameInstance->GetSubsystem<USplatCreatorSubsystem>())
+		{
+			SplatFolderName = SplatSubsystem->GetCurrentSplatPlyBaseName();
+		}
+	}
+
+	FString ImportDirFull = FPaths::ConvertRelativePathToFull(ImportDir);
+	FPaths::NormalizeFilename(ImportDirFull);
+
 	TArray<FString> DesiredPathList;
 	DesiredPathList.Reserve(ObjFilePaths.Num());
 	TSet<FString> DesiredPathSet;
 
 	for (const FString& Path : ObjFilePaths)
 	{
-		const FString AbsolutePath = FPaths::ConvertRelativePathToFull(Path);
+		FString AbsolutePath = FPaths::ConvertRelativePathToFull(Path);
+		FPaths::NormalizeFilename(AbsolutePath);
+		if (!Hyper3DObjectsImport::IsObjUnderSplatFolder(AbsolutePath, ImportDirFull, SplatFolderName))
+		{
+			continue;
+		}
 		if (!DesiredPathSet.Contains(AbsolutePath))
 		{
 			DesiredPathSet.Add(AbsolutePath);
@@ -643,10 +764,11 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 	// Place objects in a random box around ReferenceLocation
 	// Box size is 200x200 by default, but constrained by splat dimensions if smaller
 	const float HalfBoxSize = BoxSize * 0.5f;
+	const bool bPinToReferenceXY = (BoxSize <= 0.f);
 	
 	// Scale exclusion distances based on box size (relative to default 200x200 box)
-	// This makes constraints adapt to available space automatically
-	const float BoxSizeScale = FMath::Clamp(BoxSize / 200.0f, 0.25f, 1.0f); // Scale between 25% and 100%
+	// This makes constraints adapt to available space automatically. At BoxSize 0, no minimum spacing scaling.
+	const float BoxSizeScale = bPinToReferenceXY ? 0.f : FMath::Clamp(BoxSize / 200.0f, 0.25f, 1.0f);
 	const float ScaledMinSpacing = MinSpacingDistance * BoxSizeScale;
 	const float ScaledSplatExclusion = SplatPointExclusionDistance * BoxSizeScale;
 	const float ScaledComfyExclusion = ComfyStreamExclusionDistance * BoxSizeScale;
@@ -664,16 +786,20 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 			int32 MaxAttempts = 50; // Reduced attempts since constraints are now adaptive
 			bool bFoundValidPosition = false;
 			
-			// Calculate random height for this object (will be used in check)
-			float RandomHeight = BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance);
+			// Calculate height for this object (will be used in check). When BoxSize is 0, pin to BaseHeight so periodic layout refresh does not jitter Z.
+			float RandomHeight = bPinToReferenceXY
+				? BaseHeight
+				: (BaseHeight + Stream.FRandRange(-HeightVariance, HeightVariance));
 			
 			for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
 			{
-				// Try a random position
-				NewPosition = FVector2D(
-					Stream.FRandRange(-HalfBoxSize, HalfBoxSize),
-					Stream.FRandRange(-HalfBoxSize, HalfBoxSize)
-				);
+				// Try a random position (or fixed origin in XY when BoxSize is 0)
+				NewPosition = bPinToReferenceXY
+					? FVector2D::ZeroVector
+					: FVector2D(
+						Stream.FRandRange(-HalfBoxSize, HalfBoxSize),
+						Stream.FRandRange(-HalfBoxSize, HalfBoxSize)
+					);
 				
 				// Check if this position is far enough from all existing positions
 				bool bTooClose = false;
@@ -743,12 +869,14 @@ void UHyper3DObjectsSubsystem::UpdateObjectLayout()
 			
 			// Random height variation for each object
 			Instance.BaseHeight = RandomHeight;
-			// Random rotation: only randomize Yaw (Z-axis rotation), keep Pitch and Roll at base values
-			Instance.RandomRotation = FRotator(
-				BaseMeshRotation.Pitch,                                      // Keep base pitch
-				BaseMeshRotation.Yaw + Stream.FRandRange(0.0f, 360.0f),     // Full 360 degree random yaw (Z-axis)
-				BaseMeshRotation.Roll                                        // Keep base roll
-			);
+			// Random rotation unless XY placement is pinned (BoxSize 0), then keep base rotation stable across refresh
+			Instance.RandomRotation = bPinToReferenceXY
+				? BaseMeshRotation
+				: FRotator(
+					BaseMeshRotation.Pitch,
+					BaseMeshRotation.Yaw + Stream.FRandRange(0.0f, 360.0f),
+					BaseMeshRotation.Roll
+				);
 		}
 	
 		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Placed %d objects in %.1fx%.1f box centered at ReferenceLocation"), 
@@ -790,6 +918,112 @@ void UHyper3DObjectsSubsystem::UpdateObjectMotion()
 
 		// Apply random rotation for this object
 		Actor->SetActorRotation(Instance.RandomRotation);
+	}
+
+	UpdateHyper3DOpacityFade(Time);
+}
+
+void UHyper3DObjectsSubsystem::BeginHyper3DOpacityFade()
+{
+	if (!bFadeOpacityOnSplatChange)
+	{
+		bOpacityFadeTickActive = false;
+		bOpacityCycleEndedHidden = false;
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	bOpacityCycleEndedHidden = false;
+	OpacityFadeStartWorldTime = World->GetTimeSeconds();
+	bOpacityFadeTickActive = true;
+
+	for (FObjectInstance& Inst : ObjectInstances)
+	{
+		if (UMaterialInstanceDynamic* MID = Inst.ProceduralMaterialMID.Get())
+		{
+			ApplyHyper3DOpacityToMID(MID, 0.f);
+		}
+	}
+}
+
+float UHyper3DObjectsSubsystem::ComputeHyper3DOpacityAlpha(float WorldTimeSeconds) const
+{
+	if (!bFadeOpacityOnSplatChange)
+	{
+		return 1.f;
+	}
+
+	if (!bOpacityFadeTickActive)
+	{
+		return bOpacityCycleEndedHidden ? 0.f : 1.f;
+	}
+
+	const float Elapsed = WorldTimeSeconds - OpacityFadeStartWorldTime;
+	const float FadeIn = FMath::Max(0.01f, OpacityFadeInDurationSeconds);
+
+	if (Elapsed < FadeIn)
+	{
+		return FMath::Clamp(Elapsed / FadeIn, 0.f, 1.f);
+	}
+
+	if (OpacityHoldAtFullSeconds <= 0.f)
+	{
+		return 1.f;
+	}
+
+	const float HoldEndTime = FadeIn + OpacityHoldAtFullSeconds;
+	if (Elapsed < HoldEndTime)
+	{
+		return 1.f;
+	}
+
+	return 0.f;
+}
+
+void UHyper3DObjectsSubsystem::ApplyHyper3DOpacityToMID(UMaterialInstanceDynamic* MID, float Alpha) const
+{
+	if (!MID || OpacityScalarParameterName.IsNone())
+	{
+		return;
+	}
+	MID->SetScalarParameterValue(OpacityScalarParameterName, Alpha);
+}
+
+void UHyper3DObjectsSubsystem::UpdateHyper3DOpacityFade(float WorldTimeSeconds)
+{
+	if (!bFadeOpacityOnSplatChange || !bOpacityFadeTickActive)
+	{
+		return;
+	}
+
+	const float Alpha = ComputeHyper3DOpacityAlpha(WorldTimeSeconds);
+	for (FObjectInstance& Inst : ObjectInstances)
+	{
+		if (UMaterialInstanceDynamic* MID = Inst.ProceduralMaterialMID.Get())
+		{
+			ApplyHyper3DOpacityToMID(MID, Alpha);
+		}
+	}
+
+	const float Elapsed = WorldTimeSeconds - OpacityFadeStartWorldTime;
+	const float FadeIn = FMath::Max(0.01f, OpacityFadeInDurationSeconds);
+
+	if (OpacityHoldAtFullSeconds <= 0.f)
+	{
+		if (Alpha >= 1.f - KINDA_SMALL_NUMBER)
+		{
+			bOpacityFadeTickActive = false;
+		}
+	}
+	else if (Elapsed >= FadeIn + OpacityHoldAtFullSeconds && Alpha <= KINDA_SMALL_NUMBER)
+	{
+		bOpacityCycleEndedHidden = true;
+		bOpacityFadeTickActive = false;
 	}
 }
 
@@ -857,11 +1091,12 @@ bool UHyper3DObjectsSubsystem::SpawnObjectGroupFromOBJ(const FString& ObjPath)
 		RootComponent->SetWorldRotation(BaseMeshRotation);
 	}
 
-	ApplyMaterial(MeshComp, ObjectActor, TextureSet, Colors);
+	UMaterialInstanceDynamic* SpawnMID = ApplyMaterial(MeshComp, ObjectActor, TextureSet, Colors);
 
 	FObjectInstance Instance;
 	Instance.SourceObjPath = ObjPath;
 	Instance.Actor = ObjectActor;
+	Instance.ProceduralMaterialMID = SpawnMID;
 	Instance.RandomRotation = BaseMeshRotation; // Will be randomized in UpdateObjectLayout
 	Instance.DiffuseTexture = TextureSet.Diffuse;
 	Instance.MetallicTexture = TextureSet.Metallic;
@@ -921,11 +1156,12 @@ bool UHyper3DObjectsSubsystem::SpawnObjectFromCachedData(const FString& ObjPath,
 		RootComponent->SetWorldRotation(BaseMeshRotation);
 	}
 
-	ApplyMaterial(MeshComp, ObjectActor, CachedData.TextureSet, CachedData.Colors);
+	UMaterialInstanceDynamic* SpawnMID = ApplyMaterial(MeshComp, ObjectActor, CachedData.TextureSet, CachedData.Colors);
 
 	FObjectInstance Instance;
 	Instance.SourceObjPath = ObjPath;
 	Instance.Actor = ObjectActor;
+	Instance.ProceduralMaterialMID = SpawnMID;
 	Instance.RandomRotation = BaseMeshRotation; // Will be randomized in UpdateObjectLayout
 	Instance.DiffuseTexture = CachedData.TextureSet.Diffuse;
 	Instance.MetallicTexture = CachedData.TextureSet.Metallic;
@@ -1680,15 +1916,15 @@ UMaterial* UHyper3DObjectsSubsystem::CreateMaterialWithTextureParameters() const
 }
 #endif
 
-void UHyper3DObjectsSubsystem::ApplyMaterial(
+UMaterialInstanceDynamic* UHyper3DObjectsSubsystem::ApplyMaterial(
 	UProceduralMeshComponent* MeshComp,
 	AActor* Owner,
 	const FTextureSet& Textures,
-	const TArray<FColor>& VertexColors) const
+	const TArray<FColor>& VertexColors)
 {
 	if (!MeshComp)
 	{
-		return;
+		return nullptr;
 	}
 
 	// Try to get a base material
@@ -1703,7 +1939,7 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 		if (!BaseMaterial)
 		{
 			if(debug) UE_LOG(LogTemp, Error, TEXT("[Hyper3DObjects] No materials available. Mesh will be untextured."));
-			return;
+			return nullptr;
 		}
 	}
 
@@ -1712,7 +1948,7 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 	if (!DynamicMaterial)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[Hyper3DObjects] Failed to create dynamic material instance"));
-		return;
+		return nullptr;
 	}
 
 	// Get all available texture parameters from the material
@@ -1810,7 +2046,13 @@ void UHyper3DObjectsSubsystem::ApplyMaterial(
 		SetTextureParameter(Textures.PBR, TArray<FName>(PBRParams, UE_ARRAY_COUNT(PBRParams)), TEXT("PBR"));
 	}
 
+	UWorld* MatWorld = MeshComp->GetWorld();
+	const float Now = MatWorld ? MatWorld->GetTimeSeconds() : 0.f;
+	const float OpacityAlpha = ComputeHyper3DOpacityAlpha(Now);
+	ApplyHyper3DOpacityToMID(DynamicMaterial, OpacityAlpha);
+
 	MeshComp->SetMaterial(0, DynamicMaterial);
+	return DynamicMaterial;
 }
 
 FString UHyper3DObjectsSubsystem::GetImportDirectory() const
@@ -1828,6 +2070,9 @@ FString UHyper3DObjectsSubsystem::GetImportDirectory() const
 
 void UHyper3DObjectsSubsystem::DestroyAllObjects()
 {
+	bOpacityFadeTickActive = false;
+	bOpacityCycleEndedHidden = false;
+
 	for (FObjectInstance& Instance : ObjectInstances)
 	{
 		if (AActor* Actor = Instance.Actor.Get())

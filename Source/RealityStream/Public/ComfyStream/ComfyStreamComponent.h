@@ -8,6 +8,7 @@
 
 class UComfyImageFetcher;
 class UComfyPngDecoder;
+class AComfyStreamActor;
 
 //Connects to one ComfyUI websocket channel and sets up texture broadcasting 
 //pairs textures as they arrive 
@@ -15,6 +16,8 @@ UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class REALITYSTREAM_API UComfyStreamComponent : public UActorComponent
 {
 	GENERATED_BODY()
+
+	friend class AComfyStreamActor;
 
 public:
 	UComfyStreamComponent();
@@ -35,8 +38,8 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "ComfyStream")
 	FOnError OnError;
 
-	//before BeginPlay, connect configs 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ComfyStream")
+	//before BeginPlay, connect configs (hidden in details when owned by AComfyStreamActor; use Segmentation Channel Config there)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ComfyStream", meta=(EditCondition="!bSuppressStreamConfigInEditor", EditConditionHides))
 	FComfyStreamConfig StreamConfig;
 
 	//Intrinsics knobs for DepthAnything webcam
@@ -53,6 +56,10 @@ public:
 	UFUNCTION(BlueprintCallable) EComfyConnectionStatus GetConnectionStatus() const;
 
 private:
+	/** When true, Stream Config is not shown in the details panel (AComfyStreamActor sets this; not exposed to users). Serialization keeps instance defaults in sync. */
+	UPROPERTY()
+	bool bSuppressStreamConfigInEditor = false;
+
 	UPROPERTY() UComfyImageFetcher* ImageFetcher = nullptr;
 	UPROPERTY() UComfyPngDecoder*   PngDecoder   = nullptr;
 

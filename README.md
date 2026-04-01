@@ -1,231 +1,240 @@
 # RealityStream Plugin
 
-A Unreal Engine 5.6 plugin for real-time segmentation, 3D reconstruction, and point cloud visualization. The plugin integrates with ComfyUI for live texture streaming and provides tools for importing and visualizing 3D reconstruction data.
-
-## Features
-
-### ComfyStream - Real-time Texture Streaming
-- **WebSocket Connection**: Connect to ComfyUI WebViewer server via WebSocket
-- **Triple Texture Stream**: Receives RGB, Depth, and Mask textures in real-time
-- **Dynamic Material Updates**: Automatically updates material parameters when textures arrive
-- **Depth-based 3D Reconstruction**: Calculates world positions from depth maps
-- **Dynamic Actor Spawning**: Spawns actors at calculated 3D positions based on depth
-- **Texture Lerping**: Optional smooth interpolation between texture updates
-- **Auto-reconnection**: Automatic reconnection on connection loss
-- **Blueprint Support**: Full Blueprint integration with events and functions
-
-### SplatCreator - Point Cloud Visualization
-- **PLY File Import**: Loads and visualizes PLY point cloud files
-- **Adaptive Sphere Rendering**: Uses Hierarchical Instanced Static Mesh with adaptive sphere sizes
-- **Smooth Morphing**: Smooth interpolation between different point clouds
-- **Automatic Cycling**: Automatically cycles through PLY files in the SplatCreatorData folder
-- **Point Filtering**: Uniform sampling to optimize performance
-
-### Hyper3DObjects - Mesh Import System
-- **OBJ Import**: Imports OBJ meshes with textures from the MeshImport folder
-- **Procedural Mesh Generation**: Creates procedural meshes from OBJ files
-- **Texture Support**: Supports diffuse, metallic, normal, roughness, PBR, and shaded textures
-- **Floating Animation**: Objects float and bob in 3D space
-- **Automatic Discovery**: Scans and imports all OBJ files in the MeshImport directory
+A Unreal Engine 5.6 plugin for interpreting AI outputs from 3D and 2D generations to Gaussian Splats. 
 
 ## Installation
 
-Premade blueprints and materials are included in the Blueprints and Materials folder. 
+### Adding to Your Unreal Engine Project
 
-1. Copy the `RealityStream` folder to your project's `Plugins` directory
-2. Regenerate project files (Right-click `.uproject` → Generate Visual Studio project files)
-3. Compile your project in Unreal Engine 5.6
+You can add RealityStream to your Unreal Engine project in two ways:
 
-## Usage
-
-### ComfyStream Setup
-
-#### Basic Actor Setup
-
-1. Add a `ComfyStreamActor` to your level
-2. Set the `Base Material` property to a material with these texture parameters:
-   - You can use the M_displacement asset 
-   - `RGB_Map` (Texture2D Parameter)
-   - `Depth_Map` (Texture2D Parameter)
-   - `Mask_Map` (Texture2D Parameter)
-   - Optional: `Opacity` (Scalar Parameter) for fade effects
-   - Optional: `LerpAlpha` (Scalar Parameter) for texture lerping
-3. Configure the `Segmentation Channel Config`:
-   - **Server URL**: ComfyUI WebViewer WebSocket URL (default: `ws://localhost:8001`)
-   - **Channel Number**: WebSocket channel number (default: 1)
-   - **Auto Reconnect**: Enable automatic reconnection
-4. The actor will automatically connect and start receiving textures
-
-#### Blueprint Events
-
-- `OnTextureReceived(UTexture2D*)`: Called when a new texture is received
-- `OnConnectionStatusChanged(bool)`: Called when connection status changes
-- `OnError(FString)`: Called when an error occurs
-
-#### C++ Usage
-
-```cpp
-// Get the ComfyStreamActor
-AComfyStreamActor* StreamActor = GetWorld()->SpawnActor<AComfyStreamActor>();
-
-// Configure the material
-StreamActor->BaseMaterial = YourMaterial;
-
-// Configure connection
-StreamActor->SegmentationChannelConfig.ServerURL = TEXT("ws://192.168.1.65:8001");
-StreamActor->SegmentationChannelConfig.ChannelNumber = 1;
-StreamActor->SegmentationChannelConfig.bAutoReconnect = true;
-
-// Connect manually (or enable Auto Reconnect)
-StreamActor->ConnectSegmentationChannel();
-```
-
-### SplatCreator Setup
-
-1. Place PLY files in: `Plugins/RealityStream/SplatCreatorOutputs/`
-2. In Blueprint or C++, call:
+#### Option 1: Git Clone
+1. Navigate to your project's `Plugins` directory
+2. Clone the repository:
+   ```bash
+   git clone [repository-url] RealityStream
    ```
-   Get Splat Creator Subsystem -> Start Point Cloud System
+3. Add the plugin to your `.uproject` file under the `Plugins` section:
+   ```json
+   "Plugins": [
+     {
+       "Name": "RealityStream",
+       "Enabled": true
+     }
+   ]
    ```
 
-3. Place the M_VertexColor material in your project for the color.
-   
-4. The system will automatically:
-   - Scan for PLY files
-   - Load and display the first point cloud
-   - Cycle through files automatically
-   - Morph smoothly between different point clouds
-
-#### PLY File Format
-
-The plugin expects PLY files with:
-- Vertex positions (X, Y, Z)
-- Vertex colors (R, G, B)
-- ASCII or binary format supported
-
-### Hyper3DObjects Setup
-
-1. Place OBJ files and textures in: `Plugins/RealityStream/MeshImport/[ObjectName]/`
-2. Supported texture files:
-   - `texture_diffuse.png`
-   - `texture_metallic.png`
-   - `texture_normal.png`
-   - `texture_roughness.png`
-   - `texture_pbr.png`
-   - `shaded.png`
-3. In Blueprint or C++, call:
-   ```
-   Get Hyper 3D Objects Subsystem -> Activate Object Imports
+#### Option 2: Download ZIP
+1. Download the RealityStream plugin as a ZIP file
+2. Extract the contents to your project's `Plugins/RealityStream` directory
+3. Add the plugin to your `.uproject` file under the `Plugins` section:
+   ```json
+   "Plugins": [
+     {
+       "Name": "RealityStream",
+       "Enabled": true
+     }
+   ]
    ```
 
-4. Place the M_ProceduralMeshTexture material in your project for the color.
-   
-5. Objects will be imported and animated automatically
+#### Finalizing Installation
+1. Right-click your `.uproject` file and select **Generate Visual Studio project files**
+2. Open the project in Unreal Engine 5.6
+3. The plugin will compile automatically on first launch
 
-## Configuration
+## Basic Setup
 
+### Required Materials
 
-### ComfyStream Configuration
+The plugin includes example materials in the `Blueprints` and `Materials` folder. You'll need to set up the following materials for full functionality:
 
-```cpp
-FComfyStreamConfig Config;
-Config.ServerURL = TEXT("ws://localhost:8001");
-Config.ChannelNumber = 1;
-Config.ChannelType = EComfyChannel::Segmentation;
-Config.bAutoReconnect = true;
-Config.ReconnectDelay = 5.0f;
-Config.bEnableLerpSmoothing = false;
-Config.LerpSpeed = 5.0f;
-Config.LerpThreshold = 0.01f;
-```
+#### M_Displacement (for ComfyStreamActor)
+- **Blend Mode**: Masked
+- **Shading Model**: Default Lit (Surface)
+- **Required Parameters**:
+  - `RGB_Map` (Texture2D Parameter)
+  - `Mask_Map` (Texture2D Parameter)
+  - `Depth_Map_Object` (Texture Object Parameter) - Connect to `MF_DepthToNormal` material function to convert depth to normal map
 
-### ComfyStreamActor Settings
+#### M_ProceduralMeshTexture (for Hyper3DObjects)
+- **Blend Mode**: Masked
+- **Shading Model**: Default Lit (Surface)
+- **Required Parameters**:
+  - `Diffuse` (Texture2D Parameter)
+  - `Metallic` (Texture2D Parameter)
+  - `Roughness` (Texture2D Parameter)
+  - `Normal` (Texture2D Parameter)
+  - `Opacity` (Scalar Parameter)
 
-- **Actor Lifetime Seconds**: How long spawned actors persist (default: 3.0s)
-- **Lerp Speed**: Texture transition speed (default: 2.0)
-- **Location Threshold**: Distance threshold for reusing actors (default: 50.0)
-- **Fade Out Duration**: Fade-out duration before actor destruction (default: 0.5s)
+#### M_SplatMorph (for SplatCreator)
+- **Blend Mode**: Translucent
+- **Shading Model**: Default Lit (Surface)
+- **Contact Shadows**: Enabled
+- **Two Sided**: Enabled
+- **Required Parameters**:
+  - `MorphProgress` (Scalar Parameter) - Controls morph transition (0 to 1)
+- **Base Color Setup**:
+  - Use `PerInstanceCustomData` nodes with indices 0, 1, 2 to get RGB color from splat vertex data
+- **World Position Offset Setup**:
+  - Use `PerInstanceCustomData` index 4 for Y transition
+  - Use `PerInstanceCustomData` index 5 for Z transition
+  - Multiply by `(1 - MorphProgress)` to start at smallest and grow to full size
 
-### Depth Reconstruction Settings
+### Getting Started
 
-Configured on `ComfyStreamComponent`:
-- **Focal Scale**: Camera focal length multiplier (default: 1.2)
-- **Depth Scale Units**: Maximum depth distance in world units (default: 500.0)
+Once you've set up the materials, use the provided Blueprint instances to get results similar to the RealityStream installation examples.
 
-## API Reference
-
-### ComfyStreamActor
-
-Main actor for receiving and displaying ComfyUI streams.
-
-**Properties:**
-- `BaseMaterial` - Material with RGB_Map, Depth_Map, Mask_Map parameters
-- `SegmentationChannelConfig` - WebSocket connection configuration
-- `ActorLifetimeSeconds` - Lifetime of spawned texture actors
-- `LerpSpeed` - Texture transition speed
-- `LocationThreshold` - Distance threshold for actor reuse
-- `FadeOutDuration` - Fade-out duration
-
-**Functions:**
-- `ConnectSegmentationChannel()` - Connect to ComfyUI
-- `DisconnectAll()` - Disconnect from all channels
-
-**Events:**
-- `OnTextureReceived(UTexture2D*)` - Texture received
-- `OnConnectionStatusChanged(bool)` - Connection status changed
-- `OnError(FString)` - Error occurred
-
-### ComfyStreamComponent
-
-Component for handling individual ComfyUI streams.
-
-**Properties:**
-- `StreamConfig` - Connection configuration
-- `FocalScale` - Camera focal length scale
-- `DepthScaleUnits` - Maximum depth distance
-
-**Functions:**
-- `Connect()` - Connect to server
-- `Disconnect()` - Disconnect from server
-- `IsConnected()` - Check connection status
-- `GetConnectionStatus()` - Get current connection status
-
-### ComfyImageFetcher
-
-Internal class for WebSocket communication and PNG decoding.
-
-**Features:**
-- WebSocket message handling
-- PNG stream splitting (handles concatenated PNGs)
-- RGB/Depth/Mask identification by color type and size
-- Automatic frame accumulation
-
-### SplatCreatorSubsystem
-
-Game instance subsystem for point cloud visualization.
-
-**Functions:**
-- `StartPointCloudSystem()` - Initialize and start the point cloud system
-
-**Features:**
-- Automatic PLY file scanning
-- Point cloud morphing
-- Adaptive sphere sizing based on point density
-- Uniform sampling for performance
+## Blueprint Systems
 
 ### Hyper3DObjectsSubsystem
 
-Game instance subsystem for OBJ mesh import.
+The **Hyper3DObjectsSubsystem** is a Game Instance Subsystem that handles 3D object import and placement. If you don't want 3D objects in your scene, you can skip this subsystem.
 
-**Functions:**
-- `ActivateObjectImports()` - Start importing and animating objects
-- `DeactivateObjectImports()` - Stop importing objects
+#### Blueprint Functions
 
-**Features:**
-- Automatic OBJ discovery
-- Texture loading and application
-- Procedural mesh generation
-- Floating/bobbing animation
+**Placement Configuration:**
+- `Set Object Scale` / `Get Object Scale` - Set the scale of imported objects (default: 50)
+- `Set Placement Box Size` - Set the random placement area size (0 = objects stay in place, larger values = objects randomly placed within that box size)
+- `Update from Splat Dimensions` - Place objects inside the splat dimensions instead of using the placement box
+- `Set Drive Placement Box` - Boolean to determine if objects follow the placement box or follow the splat
+
+**Object Management:**
+- `Activate Object Imports` - Activate and start importing objects
+- `Deactivate Object Imports` - Deactivate and stop importing objects
+- `Set Total Instances` - Set how many floating objects you want in the scene
+
+**3D Object Fade Control:**
+- `Get Hyper3D Object Fade Enabled` / `Set Hyper3D Object Fade Enabled` - Enable/disable opacity fading for 3D objects
+- `Get Hyper3D Object Fade In Duration` / `Set Hyper3D Object Fade In Duration` - Control fade in duration (0.01-60 seconds, default: 2 seconds)
+- `Get Hyper3D Object Hold Duration` / `Set Hyper3D Object Hold Duration` - Control how long objects stay at full opacity (0 = stay visible forever, default: 10 seconds)
+
+**ComfyUI Exclusion Zone:**
+- `Set Comfy Stream Exclusion Zone` - Set an exclusion zone so 3D objects don't overlap with streamed objects
+- `Get Reference Location` / `Set Reference Location` - Get or set the exclusion zone reference location
+  - Example: Set based on actor location to avoid overlap
+
+#### Setup Example
+
+1. Place 3D mesh files in `Plugins/RealityStream/MeshImport/` 
+2. Access the subsystem in Blueprint: `Get Hyper 3D Objects Subsystem`
+3. Configure placement settings (scale, box size, total instances)
+4. Set up exclusion zones if using ComfyStream
+5. Call `Activate Object Imports` to start
+
+### SplatCreatorSubsystem
+
+The **SplatCreatorSubsystem** is a Game Instance Subsystem that handles point cloud visualization and cycling.
+
+#### Blueprint Functions
+
+**System Control:**
+- `Start Point Cloud System` - Initialize and start the point cloud visualization system
+
+**Splat Image Sending:**
+- `Set Send Current or Next` - Determine whether to send the current splat image or the next splat image to ComfyUI
+- The system can send a PNG with the same name as the splat to ComfyUI, allowing your ComfyUI output to match the splat appearance
+
+**ComfyUI Image Preview:**
+- `Set Image Preview Target` - Configure where the ComfyUI preview image appears
+  - **Target Plane**: The plane/mesh to display the preview on
+  - **Material**: The material instance to use
+  - **Target Name**: Unique identifier for this preview (each preview MUST have a separate target name)
+- If you want the preview image to appear, you must set up an image preview target
+
+**Cycle Control:**
+- `Start Next Cycle` - Manually trigger the next cycle/splat
+- `Get Cycle Length` - Returns the current cycle interval in seconds
+- `Set Cycle Length` - Change how often splats automatically cycle (accepts 1-300 seconds, default: 16 seconds)
+- By default, the system automatically changes cycles every 16 seconds
+
+**Preview Image Fade Control:**
+- `Get Preview Image Fade Enabled` / `Set Preview Image Fade Enabled` - Enable/disable opacity fading for preview images
+- `Get Preview Image Fade In Duration` / `Set Preview Image Fade In Duration` - Control fade in duration (0-10 seconds, default: 1 second)
+- `Get Preview Image Hold Duration` / `Set Preview Image Hold Duration` - Control how long preview stays at full opacity (0-60 seconds, default: 4 seconds)
+- `Get Preview Image Fade Out Duration` / `Set Preview Image Fade Out Duration` - Control fade out duration (0.1-60 seconds, default: 4 seconds)
+
+#### Setup Example
+
+1. Place PLY files in `Plugins/RealityStream/SplatCreatorOutputs/`
+2. Access the subsystem in Blueprint: `Get Splat Creator Subsystem`
+3. Call `Start Point Cloud System`
+4. (Optional) Configure image preview target for ComfyUI output
+5. (Optional) Call `Start Next Cycle` to manually control cycling
+
+### ComfyStreamActor
+
+The **ComfyStreamActor** allows you to send any PNG from ComfyUI and automatically import it into Unreal Engine via WebSocket.
+
+#### Setup Steps
+
+1. **Create Blueprint**: Create a Blueprint of type `ComfyStreamActor`
+2. **Set Base Material**: Add a base material (see M_Displacement requirements above)
+3. **Configure Segmentation Channel**:
+   - **Server URL**: WebSocket URL for ComfyUI connection
+     - If running ComfyUI on the same computer, use: `ws://localhost:8001`
+   - **Channel Number**: The WebSocket channel number
+   - **Channel Type**: Segmentation (only option currently)
+   - **Ping Interval**: Keep-alive ping interval in seconds
+   - **Auto Reconnect**: Enable to automatically reconnect after disconnecting
+   - **Reconnect Delay**: Time in seconds to wait before attempting reconnection
+   - **Enable Lerp Smoothing**: Smooth interpolation between frames
+   - **Lerp Speed**: Speed of interpolation in seconds
+   - **Lerp Threshold**: Threshold to consider lerp complete
+   - **Frame Apply Delay**: Seconds to wait before applying the next frame
+
+#### ComfyUI Workflow
+
+An example ComfyUI workflow is provided. Any workflow that outputs a PNG through WebSockets will work with this system.
+
+## Required Materials Reference
+
+### For ComfyStreamActor: M_Displacement
+
+**Material Setup:**
+- **Blend Mode**: Masked
+- **Shading Model**: Default Lit (Surface)
+
+**Required Parameters:**
+- `RGB_Map` (Texture2D Parameter)
+- `Mask_Map` (Texture2D Parameter)
+- `Depth_Map_Object` (Texture Object Parameter)
+  - Connect to `MF_DepthToNormal` material function to convert depth to normal
+
+### For Hyper3DObjects: M_ProceduralMeshTexture
+
+**Material Setup:**
+- **Blend Mode**: Masked (recommended for fading effect)
+- **Shading Model**: Default Lit (Surface)
+
+**Required Parameters:**
+- `Diffuse` (Texture2D Parameter)
+- `Metallic` (Texture2D Parameter)
+- `Roughness` (Texture2D Parameter)
+- `Normal` (Texture2D Parameter)
+- `Opacity` (Scalar Parameter)
+
+### For SplatCreator: M_SplatMorph
+
+**Material Setup:**
+- **Blend Mode**: Translucent
+- **Shading Model**: Default Lit (Surface)
+- **Contact Shadows**: Enabled
+- **Two Sided**: Enabled
+
+**Base Color Setup:**
+Use `PerInstanceCustomData` nodes to extract vertex color from splat:
+- Index 0: Red channel
+- Index 1: Green channel
+- Index 2: Blue channel
+
+**World Position Offset Setup:**
+For morphing transition effect:
+- `PerInstanceCustomData` Index 4: Y transition
+- `PerInstanceCustomData` Index 5: Z transition
+- Use `(1 - MorphProgress)` to create smallest-to-largest transition
+
+**Required Parameters:**
+- `MorphProgress` (Scalar Parameter) - Controls transition animation (0 = start, 1 = complete)
 
 ## File Structure
 
@@ -238,84 +247,14 @@ RealityStream/
 │   │   └── MeshImport/          # OBJ import system
 │   └── Public/
 │       ├── ComfyStream/          # Public headers
-│       ├── SplatCreator/        # Public headers
+│       ├── SplatCreator/         # Public headers
 │       └── MeshImport/           # Public headers
-├── SplatCreatorData/            # Place PLY files here
+├── SplatCreatorOutputs/         # Place PLY files here
 ├── MeshImport/                  # Place OBJ files and textures here
+├── Blueprints/                  # Example blueprints
+├── Materials/                   # Example materials
 └── README.md
 ```
-
-## Dependencies
-
-- **WebSockets** - For ComfyUI WebSocket communication
-- **ImageWrapper** - For PNG/JPEG decoding
-- **ProceduralMeshComponent** - For mesh generation
-- **Json** / **JsonUtilities** - For JSON parsing
-- **RenderCore** / **RHI** - For texture operations
-
-## Troubleshooting
-
-### ComfyStream Issues
-
-1. **No textures received**: 
-   - Verify ComfyUI WebViewer is running and accessible
-   - Check WebSocket URL and channel number
-   - Ensure ComfyUI is sending RGB, Depth, and Mask textures
-
-2. **Material not updating**:
-   - Verify material has exact parameter names: `RGB_Map`, `Depth_Map`, `Mask_Map`
-   - Check that BaseMaterial is assigned to ComfyStreamActor
-
-3. **Actors not spawning**:
-   - Verify depth texture is being received
-   - Check DepthScaleUnits and FocalScale settings
-   - Ensure DisplayMesh has a static mesh assigned
-
-### SplatCreator Issues
-
-1. **No point clouds visible**:
-   - Verify PLY files are in `SplatCreatorOutputs/` folder
-   - Check that `StartPointCloudSystem()` was called
-   - Verify PLY files contain vertex positions and colors
-
-2. **Performance issues**:
-   - Point clouds are automatically sampled to 100,000 points max to prevent unnecessary culling. 
-   - Adjust sphere sizes in code if needed
-
-### Hyper3DObjects Issues
-
-1. **Objects not importing**:
-   - Verify OBJ files are in `MeshImport/[ObjectName]/` folders
-   - Check that `ActivateObjectImports()` was called
-   - Ensure OBJ files are valid
-
-2. **Textures not loading**:
-   - Verify texture files are in the same folder as the OBJ
-   - Check texture file names match expected names
-   - Ensure textures are valid image files
-
-## Technical Details
-
-### Texture Processing
-
-- Textures are received as PNG streams over WebSocket
-- PNGs are automatically identified as RGB, Depth, or Mask based on:
-  - Color type detection (RGB vs grayscale)
-  - File size comparison
-- Textures are accumulated until a complete frame (RGB + Depth + Mask) is received
-
-### Depth Reconstruction
-
-- Uses DepthAnything depth format (normalized 0-1, where 1.0 = near, 0.0 = far)
-- Automatically estimates camera intrinsics from texture dimensions
-- Converts depth to world coordinates using Unreal's coordinate system (Z forward, X right, Y up)
-
-### Point Cloud Rendering
-
-- Uses Hierarchical Instanced Static Mesh (HISM) for efficient rendering
-- Adaptive sphere sizes based on nearest neighbor distance
-- High density areas use smaller spheres (0.08 units)
-- Sparse areas use larger spheres (0.3 units)
 
 ## License
 
