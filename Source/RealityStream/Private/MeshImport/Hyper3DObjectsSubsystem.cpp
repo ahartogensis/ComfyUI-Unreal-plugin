@@ -60,12 +60,13 @@ namespace Hyper3DObjectsImport
 		return Radians * 57.29577951308232f;
 	}
 
-	/** OBJ must live under ImportDir/<SplatFolderName>/ (any depth). Empty SplatFolderName matches nothing. */
+	/** OBJ must live under ImportDir/<SplatFolderName>/ (any depth). Empty SplatFolderName matches ALL files (independent mode). */
 	static bool IsObjUnderSplatFolder(const FString& AbsoluteObjPath, const FString& ImportDirFull, const FString& SplatFolderName)
 	{
 		if (SplatFolderName.IsEmpty())
 		{
-			return false;
+			// When no splat is active, allow all OBJ files (independent mode)
+			return true;
 		}
 		FString AllowedRoot = ImportDirFull / SplatFolderName;
 		FPaths::NormalizeFilename(AllowedRoot);
@@ -556,6 +557,15 @@ void UHyper3DObjectsSubsystem::RefreshObjects()
 		{
 			SplatFolderName = SplatSubsystem->GetCurrentSplatPlyBaseName();
 		}
+	}
+
+	if (SplatFolderName.IsEmpty())
+	{
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] No splat loaded - running in independent mode (all OBJ files will be loaded)"));
+	}
+	else
+	{
+		if(debug) UE_LOG(LogTemp, Display, TEXT("[Hyper3DObjects] Splat-linked mode - loading OBJs from folder: %s"), *SplatFolderName);
 	}
 
 	FString ImportDirFull = FPaths::ConvertRelativePathToFull(ImportDir);

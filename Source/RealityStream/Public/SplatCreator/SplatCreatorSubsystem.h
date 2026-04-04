@@ -237,7 +237,7 @@ public:
 	bool bVisibleFromInside = true;
 
 	/** Interval in seconds between automatic PLY cycle changes */
-	UPROPERTY(EditAnywhere, Category = "SplatCreator|Cycle", meta = (EditCondition = "!bCycleSplatOnComfyFrame", ClampMin = "1.0", ClampMax = "300.0"))
+	UPROPERTY(EditAnywhere, Category = "SplatCreator|Cycle", meta = (EditCondition = "!bCycleSplatOnComfyFrame", ClampMin = "1.0", ClampMax = "300.0"), Setter = "SetCycleLength", Getter = "GetCycleLength")
 	float CycleIntervalSeconds = 16.0f;
 
 	/** Delay in seconds after cycle change before morphing starts */

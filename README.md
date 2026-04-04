@@ -236,6 +236,39 @@ For morphing transition effect:
 **Required Parameters:**
 - `MorphProgress` (Scalar Parameter) - Controls transition animation (0 = start, 1 = complete)
 
+## Material Location & Asset Paths
+
+The plugin automatically searches for materials in multiple locations with a smart fallback system. You don't need to place materials in a specific spot, but following the recommended paths ensures optimal performance.
+
+### Recommended Location (Primary Search Path)
+Place your materials in: **`/Game/_GENERATED/Materials/`**
+
+The plugin prioritizes this location for:
+- `M_ProceduralMeshTexture`
+- `M_VertexColor`
+- `M_SplatMorph`
+- `M_image`
+
+### Fallback Search Paths
+
+If materials aren't found in the primary location, the plugin automatically searches:
+
+1. **Specific Fallback Paths:**
+   - `/Game/M_ProceduralMeshTexture.M_ProceduralMeshTexture`
+   - `/Game/ImportedTextures/M_ProceduralMeshTexture.M_ProceduralMeshTexture`
+   - `/Game/M_VertexColor.M_VertexColor`
+
+2. **Asset Registry Search:**
+   - The plugin uses Unreal's Asset Registry to search the entire `/Game/` directory for materials with matching names
+
+3. **Engine Defaults (Last Resort):**
+   - `/Engine/EngineMaterials/DefaultMaterial`
+   - `/Engine/BasicShapes/BasicShapeMaterial`
+   - `/Engine/EditorMaterials/WidgetVertexColorMaterial`
+
+### Summary
+While you can place materials anywhere in your `/Game/` content folder and the plugin will find them, using `/Game/_GENERATED/Materials/` is recommended for best performance and to avoid unnecessary asset registry searches.
+
 ## File Structure
 
 ```
