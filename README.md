@@ -8,13 +8,16 @@ A Unreal Engine 5.6 plugin for interpreting AI outputs from 3D and 2D generation
 
 You can add RealityStream to your Unreal Engine project in two ways:
 
+Make sure to create an Unreal Engine project in C++ NOT Blueprints.
+
 #### Option 1: Git Clone
-1. Navigate to your project's `Plugins` directory
+1. Navigate to your project's `Plugins` directory or create the directory.
 2. Clone the repository:
    ```bash
-   git clone [repository-url] RealityStream
+   git clone [repository-url]
    ```
-3. Add the plugin to your `.uproject` file under the `Plugins` section:
+3. Rename the folder to RealityStream.
+4. Add the plugin to your `.uproject` file under the `Plugins` section:
    ```json
    "Plugins": [
      {
@@ -26,8 +29,9 @@ You can add RealityStream to your Unreal Engine project in two ways:
 
 #### Option 2: Download ZIP
 1. Download the RealityStream plugin as a ZIP file
-2. Extract the contents to your project's `Plugins/RealityStream` directory
-3. Add the plugin to your `.uproject` file under the `Plugins` section:
+2. Extract the contents and place it in the directory `Plugins` or create one. 
+3. Rename the file to RealityStream
+4. Add the plugin to your `.uproject` file under the `Plugins` section:
    ```json
    "Plugins": [
      {
