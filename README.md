@@ -14,10 +14,10 @@ Make sure to create an Unreal Engine project in C++ NOT Blueprints.
 1. Navigate to your project's `Plugins` directory or create the directory.
 2. Clone the repository:
    ```bash
-   git clone [repository-url]
+   git clone [repository-url] RealityStream
    ```
-3. Rename the folder to RealityStream.
-4. Add the plugin to your `.uproject` file under the `Plugins` section:
+   You only need the RealityStream folder. 
+3. Add the plugin to your `.uproject` file under the `Plugins` section:
    ```json
    "Plugins": [
      {
@@ -29,8 +29,8 @@ Make sure to create an Unreal Engine project in C++ NOT Blueprints.
 
 #### Option 2: Download ZIP
 1. Download the RealityStream plugin as a ZIP file
-2. Extract the contents and place it in the directory `Plugins` or create one. 
-3. Rename the file to RealityStream
+2. Extract the contents and get the folder RealityStream
+3. Place the folder RealityStream in the directory `Plugins` or create one. 
 4. Add the plugin to your `.uproject` file under the `Plugins` section:
    ```json
    "Plugins": [
