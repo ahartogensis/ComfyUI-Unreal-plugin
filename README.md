@@ -188,7 +188,7 @@ The **ComfyStreamActor** allows you to send any PNG from ComfyUI and automatical
 
 #### ComfyUI Workflow
 
-An example ComfyUI workflow is provided. Any workflow that outputs a PNG through WebSockets will work with this system.
+An example ComfyUI workflow is provided. Any workflow that outputs a PNG through WebSockets will work with this system. It is called object sender.json
 
 ## Required Materials Reference
 
